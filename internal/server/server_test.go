@@ -1,0 +1,369 @@
+package server
+
+import (
+	"bytes"
+	"encoding/json"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"reflect"
+	"strings"
+	"testing"
+
+	"zapatos-erp-go/internal/audit"
+	"zapatos-erp-go/internal/auth"
+	"zapatos-erp-go/internal/modules/finishedgoods"
+	"zapatos-erp-go/internal/modules/logistics"
+	"zapatos-erp-go/internal/modules/packaging"
+	"zapatos-erp-go/internal/modules/rawmaterials"
+	"zapatos-erp-go/internal/store"
+	"zapatos-erp-go/internal/web"
+)
+
+func TestHandlerDimensionsFlows(t *testing.T) {
+	root := t.TempDir()
+	sessions := auth.NewSessionStore(filepath.Join(root, "sessions.json"), []auth.UserAccount{
+		auth.NewUserAccount("admin", "admin123", "administrador"),
+	})
+	h := NewHandler(&Modules{
+		RawMaterials:  rawSvc(),
+		FinishedGoods: finishedSvc(),
+		Packaging:     packagingSvc(),
+		Logistics:     logisticsSvc(),
+	}, sessions, audit.NewStore(filepath.Join(root, "audit.json")), web.NewUI())
+
+	token := loginAs(t, h, "admin", "admin123")
+
+	resp := performRequest(t, h, http.MethodPost, "/api/packaging", map[string]any{
+		"id":            "pkg-1",
+		"name":          "Caja master",
+		"transportMode": "camion",
+		"maxUnits":      10,
+		"dimensions":    map[string]any{"lengthCm": 30, "widthCm": 20, "heightCm": 10, "weightKg": 1},
+	}, token)
+	if resp.Code != http.StatusCreated {
+		t.Fatalf("expected 201, got %d: %s", resp.Code, resp.Body.String())
+	}
+
+	resp = performRequest(t, h, http.MethodGet, "/api/packaging", nil, token)
+	if resp.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", resp.Code)
+	}
+	if !bytes.Contains(resp.Body.Bytes(), []byte("pkg-1")) {
+		t.Fatalf("expected response to contain saved item, got %s", resp.Body.String())
+	}
+
+	resp = performRequest(t, h, http.MethodPost, "/api/logistics", map[string]any{
+		"id":            "slot-1",
+		"name":          "Rack A",
+		"zone":          "Z1",
+		"capacityUnits": 8,
+		"dimensions":    map[string]any{"lengthCm": 10, "widthCm": 12, "heightCm": 14, "weightKg": 1},
+	}, token)
+	if resp.Code != http.StatusCreated {
+		t.Fatalf("expected 201, got %d: %s", resp.Code, resp.Body.String())
+	}
+
+	resp = performRequest(t, h, http.MethodPost, "/api/finished-goods", map[string]any{
+		"style":      "Oxford",
+		"size":       "40",
+		"color":      "Negro",
+		"stock":      1,
+		"dimensions": map[string]any{"lengthCm": 28, "widthCm": 10, "heightCm": 12, "weightKg": 0.8},
+	}, token)
+	if resp.Code != http.StatusCreated {
+		t.Fatalf("expected finished goods 201, got %d: %s", resp.Code, resp.Body.String())
+	}
+
+	resp = performRequest(t, h, http.MethodPost, "/api/raw-materials", map[string]any{
+		"id":         "rm-1",
+		"name":       "Cuero",
+		"unit":       "m2",
+		"minStock":   2,
+		"dimensions": map[string]any{"lengthCm": 5, "widthCm": 5, "heightCm": 1, "weightKg": 0.2},
+	}, token)
+	if resp.Code != http.StatusCreated {
+		t.Fatalf("expected raw materials 201, got %d: %s", resp.Code, resp.Body.String())
+	}
+
+	resp = performRequest(t, h, http.MethodGet, "/app", nil, "")
+	if resp.Code != http.StatusOK {
+		t.Fatalf("expected app 200, got %d", resp.Code)
+	}
+	if !bytes.Contains(resp.Body.Bytes(), []byte("Embalaje / transporte")) || !bytes.Contains(resp.Body.Bytes(), []byte("Stock y logística")) {
+		t.Fatalf("expected app html to include new areas")
+	}
+}
+
+func TestHandlerAppliesSecurityHeaders(t *testing.T) {
+	h := NewHandler(&Modules{
+		RawMaterials:  rawSvc(),
+		FinishedGoods: finishedSvc(),
+		Packaging:     packagingSvc(),
+		Logistics:     logisticsSvc(),
+	}, auth.NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"), []auth.UserAccount{
+		auth.NewUserAccount("admin", "admin123", "administrador"),
+	}), audit.NewStore(filepath.Join(t.TempDir(), "audit.json")), web.NewUI())
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/health", nil)
+	h.ServeHTTP(rec, req)
+
+	if got := rec.Header().Get("X-Content-Type-Options"); got != "nosniff" {
+		t.Fatalf("X-Content-Type-Options = %q, want nosniff", got)
+	}
+	if got := rec.Header().Get("X-Frame-Options"); got != "DENY" {
+		t.Fatalf("X-Frame-Options = %q, want DENY", got)
+	}
+	if got := rec.Header().Get("Referrer-Policy"); got != "same-origin" {
+		t.Fatalf("Referrer-Policy = %q, want same-origin", got)
+	}
+}
+
+func TestHardeningRecoversFromPanic(t *testing.T) {
+	h := withHardening(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		panic("boom")
+	}))
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/panic", nil)
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("expected 500, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "internal server error") {
+		t.Fatalf("expected recovery response, got %s", rec.Body.String())
+	}
+}
+
+func TestObservabilityEchoesTraceHeadersAndServesMetrics(t *testing.T) {
+	h := observabilityTestHandler(t)
+
+	trace := "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/health", nil)
+	req.Header.Set("X-Request-Id", "req-123")
+	req.Header.Set("Traceparent", trace)
+	h.ServeHTTP(rec, req)
+
+	if got := rec.Header().Get("X-Request-Id"); got != "req-123" {
+		t.Fatalf("X-Request-Id = %q, want req-123", got)
+	}
+	if got := rec.Header().Get("Traceparent"); got != trace {
+		t.Fatalf("Traceparent = %q, want %q", got, trace)
+	}
+
+	metrics := httptest.NewRecorder()
+	h.ServeHTTP(metrics, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	if metrics.Code != http.StatusOK {
+		t.Fatalf("expected metrics 200, got %d: %s", metrics.Code, metrics.Body.String())
+	}
+	var snapshot map[string]any
+	if err := json.Unmarshal(metrics.Body.Bytes(), &snapshot); err != nil {
+		t.Fatalf("decode metrics: %v", err)
+	}
+	if _, ok := snapshot["requests_total"]; !ok {
+		t.Fatalf("expected requests_total in metrics snapshot, got %#v", snapshot)
+	}
+	if _, ok := snapshot["status_counts"]; !ok {
+		t.Fatalf("expected status_counts in metrics snapshot, got %#v", snapshot)
+	}
+}
+
+func TestRespondErrorRedactsInternalFailures(t *testing.T) {
+	rec := httptest.NewRecorder()
+	respondError(rec, http.StatusInternalServerError, fmt.Errorf("secret token leaked"))
+
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("expected 500, got %d", rec.Code)
+	}
+	if strings.Contains(rec.Body.String(), "secret token leaked") {
+		t.Fatalf("expected redacted body, got %s", rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "internal server error") {
+		t.Fatalf("expected generic internal error body, got %s", rec.Body.String())
+	}
+}
+
+func TestDecodeJSONBodyRejectsOversizedPayload(t *testing.T) {
+	h := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var payload struct {
+			Username string `json:"username"`
+		}
+		if err := decodeJSONBody(w, r, 8, &payload); err != nil {
+			if isBodyTooLarge(err) {
+				respondError(w, http.StatusRequestEntityTooLarge, err)
+				return
+			}
+			respondError(w, http.StatusBadRequest, err)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+	})
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/login", strings.NewReader(`{"username":"`+strings.Repeat("a", 64)+`","password":"x"}`))
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("expected 413, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "too large") && !strings.Contains(rec.Body.String(), "request body") {
+		t.Fatalf("expected body-too-large response, got %s", rec.Body.String())
+	}
+}
+
+func TestNewHTTPServerUsesConservativeTimeouts(t *testing.T) {
+	server := newHTTPServer(":8080", http.NewServeMux())
+
+	if server.ReadHeaderTimeout <= 0 {
+		t.Fatal("expected ReadHeaderTimeout to be set")
+	}
+	if server.ReadTimeout <= 0 {
+		t.Fatal("expected ReadTimeout to be set")
+	}
+	if server.WriteTimeout <= 0 {
+		t.Fatal("expected WriteTimeout to be set")
+	}
+	if server.IdleTimeout <= 0 {
+		t.Fatal("expected IdleTimeout to be set")
+	}
+}
+
+func TestHandlerReloadsPersistentSessionAndAuditOrder(t *testing.T) {
+	root := t.TempDir()
+	sessionsPath := filepath.Join(root, "sessions.json")
+	auditPath := filepath.Join(root, "audit.json")
+	writeAuditEvents(t, auditPath, []audit.Event{
+		{Actor: "audit", Action: "later", Entity: "packaging:pkg-2", At: "2026-06-11T10:00:00Z"},
+		{Actor: "audit", Action: "earlier", Entity: "packaging:pkg-1", At: "2026-06-11T09:00:00Z"},
+	})
+
+	first := NewHandler(&Modules{
+		RawMaterials:  rawSvc(),
+		FinishedGoods: finishedSvc(),
+		Packaging:     packagingSvc(),
+		Logistics:     logisticsSvc(),
+	}, auth.NewSessionStore(sessionsPath, []auth.UserAccount{
+		auth.NewUserAccount("admin", "admin123", "administrador"),
+		auth.NewUserAccount("audit", "audit123", "auditoria"),
+	}), audit.NewStore(auditPath), web.NewUI())
+	adminToken := loginAs(t, first, "admin", "admin123")
+	if adminToken == "" {
+		t.Fatal("expected admin token")
+	}
+
+	restarted := NewHandler(&Modules{
+		RawMaterials:  rawSvc(),
+		FinishedGoods: finishedSvc(),
+		Packaging:     packagingSvc(),
+		Logistics:     logisticsSvc(),
+	}, auth.NewSessionStore(sessionsPath, []auth.UserAccount{
+		auth.NewUserAccount("admin", "admin123", "administrador"),
+		auth.NewUserAccount("audit", "audit123", "auditoria"),
+	}), audit.NewStore(auditPath), web.NewUI())
+
+	reloadResp := performRequest(t, restarted, http.MethodGet, "/api/me", nil, adminToken)
+	if reloadResp.Code != http.StatusOK {
+		t.Fatalf("expected reloaded session to authorize, got %d: %s", reloadResp.Code, reloadResp.Body.String())
+	}
+
+	auditToken := loginAs(t, restarted, "audit", "audit123")
+	resp := performRequest(t, restarted, http.MethodGet, "/api/audit", nil, auditToken)
+	if resp.Code != http.StatusOK {
+		t.Fatalf("expected audit 200, got %d: %s", resp.Code, resp.Body.String())
+	}
+	var events []audit.Event
+	if err := json.Unmarshal(resp.Body.Bytes(), &events); err != nil {
+		t.Fatalf("decode audit events: %v", err)
+	}
+	want := []audit.Event{
+		{Actor: "audit", Action: "earlier", Entity: "packaging:pkg-1", At: "2026-06-11T09:00:00Z"},
+		{Actor: "audit", Action: "later", Entity: "packaging:pkg-2", At: "2026-06-11T10:00:00Z"},
+	}
+	if !reflect.DeepEqual(events, want) {
+		t.Fatalf("events = %#v, want %#v", events, want)
+	}
+}
+
+func writeAuditEvents(t *testing.T, path string, events []audit.Event) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatalf("mkdir audit: %v", err)
+	}
+	data, err := json.MarshalIndent(events, "", "  ")
+	if err != nil {
+		t.Fatalf("marshal audit events: %v", err)
+	}
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		t.Fatalf("write audit events: %v", err)
+	}
+}
+
+func performRequest(t *testing.T, h http.Handler, method, path string, body map[string]any, token string) *httptest.ResponseRecorder {
+	t.Helper()
+	var payload []byte
+	if body != nil {
+		payload, _ = json.Marshal(body)
+	}
+	req := httptest.NewRequest(method, path, bytes.NewReader(payload))
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
+	if body != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	return rec
+}
+
+func loginAs(t *testing.T, h http.Handler, username, password string) string {
+	t.Helper()
+	payload, _ := json.Marshal(map[string]string{"username": username, "password": password})
+	req := httptest.NewRequest(http.MethodPost, "/api/login", bytes.NewReader(payload))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("login failed: %d %s", rec.Code, rec.Body.String())
+	}
+	var resp struct {
+		Token string `json:"token"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode login response: %v", err)
+	}
+	return resp.Token
+}
+
+func rawSvc() *rawmaterials.Service {
+	return rawmaterials.New(store.NewMemoryRepository([]rawmaterials.RawMaterial{}, func(v rawmaterials.RawMaterial) string { return v.ID }))
+}
+
+func finishedSvc() *finishedgoods.Service {
+	return finishedgoods.New(store.NewMemoryRepository([]finishedgoods.FinishedProductVariant{}, func(v finishedgoods.FinishedProductVariant) string { return v.ID }))
+}
+
+func packagingSvc() *packaging.Service {
+	return packaging.New(store.NewMemoryRepository([]packaging.PackagingSpec{}, func(v packaging.PackagingSpec) string { return v.ID }))
+}
+
+func logisticsSvc() *logistics.Service {
+	return logistics.New(store.NewMemoryRepository([]logistics.StorageSlot{}, func(v logistics.StorageSlot) string { return v.ID }))
+}
+
+func observabilityTestHandler(t *testing.T) http.Handler {
+	t.Helper()
+	return NewHandler(&Modules{
+		RawMaterials:  rawSvc(),
+		FinishedGoods: finishedSvc(),
+		Packaging:     packagingSvc(),
+		Logistics:     logisticsSvc(),
+	}, auth.NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"), []auth.UserAccount{
+		auth.NewUserAccount("admin", "admin123", "administrador"),
+	}), audit.NewStore(filepath.Join(t.TempDir(), "audit.json")), web.NewUI())
+}

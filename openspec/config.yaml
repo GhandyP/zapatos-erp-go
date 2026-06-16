@@ -1,0 +1,30 @@
+schema: spec-driven
+
+context: |
+  Project: zapatos-erp-go
+  Stack: Go 1.25, standard library HTTP server, JSON file repositories, server-side rendered HTML UI
+  Architecture: modular monolith with internal/app bootstrap, internal/server HTTP handlers, internal/modules domain services, internal/store persistence, internal/auth/session management, internal/web UI rendering
+  Testing: go test ./..., unit tests across internal packages, go vet ./...
+  Style: idiomatic Go, gofmt formatting, table-driven tests where practical, package-local naming, explicit error handling
+
+rules:
+  proposal:
+    - Include rollback plan for risky changes
+  specs:
+    - Use Given/When/Then for scenarios
+    - Use RFC 2119 keywords (MUST, SHALL, SHOULD, MAY)
+  design:
+    - Document architectural decisions with rationale
+  tasks:
+    - Group by phase and keep tasks completable in one session
+  apply:
+    - Follow existing Go package patterns
+    - strict_tdd: true
+    - test_command: "go test ./..."
+  verify:
+    - test_command: "go test ./..."
+    - build_command: "go build ./..."
+    - coverage_command: "go test ./... -cover"
+    - coverage_threshold: 0
+  archive:
+    - Warn before merging destructive deltas

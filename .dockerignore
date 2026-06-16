@@ -1,0 +1,17 @@
+.git
+.github
+.idea
+.vscode
+.DS_Store
+bin/
+dist/
+tmp/
+coverage.out
+*.log
+*.swp
+*.tmp
+node_modules/
+docs/
+openspec/
+**/*_test.go
+**/*.md

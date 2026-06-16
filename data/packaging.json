@@ -1,0 +1,14 @@
+[
+  {
+    "id": "pkg-1",
+    "name": "Caja estandar",
+    "transportMode": "camion",
+    "maxUnits": 20,
+    "dimensions": {
+      "lengthCm": 40,
+      "widthCm": 30,
+      "heightCm": 25,
+      "weightKg": 1.2
+    }
+  }
+]

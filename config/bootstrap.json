@@ -1,0 +1,12 @@
+{
+  "bindAddr": ":3001",
+  "dataDir": "data",
+  "seedAccounts": [
+    { "username": "admin", "password": "admin123", "role": "administrador" },
+    { "username": "warehouse", "password": "warehouse123", "role": "almacen" },
+    { "username": "sales", "password": "sales123", "role": "ventas" },
+    { "username": "accounting", "password": "accounting123", "role": "contabilidad" },
+    { "username": "audit", "password": "audit123", "role": "auditoria" },
+    { "username": "production", "password": "production123", "role": "produccion" }
+  ]
+}

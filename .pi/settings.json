@@ -1,0 +1,39 @@
+{
+	"subagents": {
+		"agentOverrides": {
+			"sdd-sync": {
+				"model": "opencode-go/deepseek-v4-flash"
+			},
+			"sdd-archive": {
+				"model": "opencode-go/deepseek-v4-flash"
+			},
+			"sdd-onboard": {
+				"model": "opencode-go/deepseek-v4-flash"
+			},
+			"sdd-init": {
+				"model": "opencode-go/deepseek-v4-pro"
+			},
+			"sdd-explore": {
+				"model": "opencode-go/deepseek-v4-flash"
+			},
+			"sdd-proposal": {
+				"model": "opencode-go/deepseek-v4-flash"
+			},
+			"sdd-spec": {
+				"model": "opencode-go/deepseek-v4-flash"
+			},
+			"sdd-design": {
+				"model": "opencode-go/deepseek-v4-flash"
+			},
+			"sdd-tasks": {
+				"model": "opencode-go/deepseek-v4-flash"
+			},
+			"sdd-apply": {
+				"model": "opencode-go/deepseek-v4-flash"
+			},
+			"sdd-verify": {
+				"model": "opencode-go/deepseek-v4-flash"
+			}
+		}
+	}
+}

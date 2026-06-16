@@ -1,0 +1,38 @@
+[
+  {
+    "id": "rm-100",
+    "name": "Cuero premium",
+    "unit": "m2",
+    "minStock": 15,
+    "dimensions": {
+      "lengthCm": 100,
+      "widthCm": 50,
+      "heightCm": 2,
+      "weightKg": 3.5
+    }
+  },
+  {
+    "id": "rm-audit-test",
+    "name": "Cuero audit",
+    "unit": "m2",
+    "minStock": 11,
+    "dimensions": {
+      "lengthCm": 100,
+      "widthCm": 50,
+      "heightCm": 2,
+      "weightKg": 3.5
+    }
+  },
+  {
+    "id": "rm-filter-test",
+    "name": "Cuero filtro",
+    "unit": "m2",
+    "minStock": 12,
+    "dimensions": {
+      "lengthCm": 100,
+      "widthCm": 50,
+      "heightCm": 2,
+      "weightKg": 3.5
+    }
+  }
+]

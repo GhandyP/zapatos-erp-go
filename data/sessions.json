@@ -1,0 +1,23 @@
+[
+  {
+    "token": "sess_320867b17d1e87ea65467acb6e2eca45",
+    "user": {
+      "username": "admin",
+      "role": "administrador"
+    }
+  },
+  {
+    "token": "sess_a1d36ff3f1353d15603aaced291bc53f",
+    "user": {
+      "username": "sales",
+      "role": "ventas"
+    }
+  },
+  {
+    "token": "sess_d0560469fcbf6e0ebbcbf4fd4c2eeaec",
+    "user": {
+      "username": "admin",
+      "role": "administrador"
+    }
+  }
+]

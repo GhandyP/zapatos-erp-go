@@ -1,0 +1,66 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  validation:
+    name: Validate tag
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Download modules
+        run: go mod download
+
+      - name: Run tests
+        run: go test ./...
+
+      - name: Run vet
+        run: go vet ./...
+
+      - name: Build
+        run: go build ./...
+
+  release:
+    name: Publish release assets
+    needs: validation
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Build release binary
+        run: |
+          mkdir -p dist
+          go build -trimpath -ldflags="-s -w" -o "dist/zapatos-erp-${{ github.ref_name }}-linux-amd64" ./cmd/zapatos-erp
+
+      - name: Create checksum
+        run: |
+          cd dist
+          sha256sum "zapatos-erp-${{ github.ref_name }}-linux-amd64" > SHA256SUMS
+
+      - name: Upload release assets
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/zapatos-erp-${{ github.ref_name }}-linux-amd64
+            dist/SHA256SUMS

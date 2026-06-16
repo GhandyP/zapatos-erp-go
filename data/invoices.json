@@ -1,0 +1,16 @@
+[
+  {
+    "id": "inv-filter-test",
+    "customerId": "cli-filter",
+    "total": 100,
+    "tax": 21,
+    "status": "issued"
+  },
+  {
+    "id": "asdf",
+    "customerId": "asdf",
+    "total": 0.24,
+    "tax": 0.18,
+    "status": "paid"
+  }
+]

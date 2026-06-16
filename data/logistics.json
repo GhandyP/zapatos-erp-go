@@ -1,0 +1,14 @@
+[
+  {
+    "id": "slot-1",
+    "name": "Rack A",
+    "zone": "Z1",
+    "capacityUnits": 5,
+    "dimensions": {
+      "lengthCm": 100,
+      "widthCm": 60,
+      "heightCm": 180,
+      "weightKg": 12
+    }
+  }
+]

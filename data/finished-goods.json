@@ -1,0 +1,96 @@
+[
+  {
+    "id": "fg-loafer-negro-39",
+    "style": "Mocasín ejecutivo",
+    "size": "39",
+    "color": "Negro",
+    "stock": 7,
+    "dimensions": {
+      "lengthCm": 30,
+      "widthCm": 10,
+      "heightCm": 12,
+      "weightKg": 0.8
+    },
+    "adjustments": [
+      {
+        "id": "adj_seed_3",
+        "delta": 7,
+        "note": "Carga inicial",
+        "at": "2026-04-10T00:00:00.000Z"
+      }
+    ]
+  },
+  {
+    "id": "fg-filter-test",
+    "style": "Oxford filtro",
+    "size": "41",
+    "color": "Marron",
+    "stock": 4,
+    "dimensions": {
+      "lengthCm": 30,
+      "widthCm": 10,
+      "heightCm": 12,
+      "weightKg": 0.8
+    }
+  },
+  {
+    "id": "fg-oxford-negro-40",
+    "style": "Oxford clásico",
+    "size": "40",
+    "color": "Negro",
+    "stock": 18,
+    "dimensions": {
+      "lengthCm": 30,
+      "widthCm": 10,
+      "heightCm": 12,
+      "weightKg": 0.8
+    },
+    "adjustments": [
+      {
+        "id": "adj_seed_1",
+        "delta": 18,
+        "note": "Carga inicial",
+        "at": "2026-04-10T00:00:00.000Z"
+      },
+      {
+        "id": "adj_mnsf7pwo_g28g1j",
+        "delta": 1,
+        "note": "browser check",
+        "at": "2026-04-10T04:43:31.176Z"
+      },
+      {
+        "id": "adj_1775882034261719483",
+        "delta": 1,
+        "note": "qa-check",
+        "at": "2026-04-11T04:33:54.261725918Z"
+      },
+      {
+        "id": "adj_1775882034268952939",
+        "delta": -1,
+        "note": "qa-revert",
+        "at": "2026-04-11T04:33:54.268956005Z"
+      }
+    ]
+  },
+  {
+    "id": "fg-oxford-cafe-41",
+    "style": "Oxford clásico",
+    "size": "41",
+    "color": "Café",
+    "stock": 11,
+    "dimensions": {
+      "lengthCm": 30,
+      "widthCm": 10,
+      "heightCm": 12,
+      "weightKg": 0.8
+    },
+    "adjustments": [
+      {
+        "id": "adj_seed_2",
+        "delta": 11,
+        "note": "Carga inicial",
+        "at": "2026-04-10T00:00:00.000Z"
+      }
+    ]
+  }
+]
