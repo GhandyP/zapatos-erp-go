@@ -216,6 +216,39 @@ func TestDecodeJSONBodyRejectsOversizedPayload(t *testing.T) {
 	}
 }
 
+func TestProtectedResourcesRequireAuthentication(t *testing.T) {
+	h := observabilityTestHandler(t)
+	for _, path := range []string{"/api/raw-materials", "/api/packaging", "/api/audit"} {
+		t.Run(path, func(t *testing.T) {
+			rec := httptest.NewRecorder()
+			h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, path, nil))
+			if rec.Code != http.StatusUnauthorized {
+				t.Fatalf("GET %s returned %d, want %d: %s", path, rec.Code, http.StatusUnauthorized, rec.Body.String())
+			}
+		})
+	}
+}
+
+func TestDecodeJSONBodyRejectsTrailingValues(t *testing.T) {
+	h := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var payload struct {
+			Username string `json:"username"`
+		}
+		if err := decodeJSONBody(w, r, requestBodyLimit, &payload); err != nil {
+			respondError(w, http.StatusBadRequest, err)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+	})
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/login", strings.NewReader(`{"username":"admin"}{"extra":true}`))
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for trailing JSON, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
 func TestNewHTTPServerUsesConservativeTimeouts(t *testing.T) {
 	server := newHTTPServer(":8080", http.NewServeMux())
 

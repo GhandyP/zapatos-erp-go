@@ -13,3 +13,20 @@ func TestRenderIncludesDimensionsAreas(t *testing.T) {
 		}
 	}
 }
+
+func TestRenderIncludesImprovedUXElements(t *testing.T) {
+	html := NewUI().Render()
+	for _, want := range []string{
+		"moduleNav",
+		"role=\"status\"",
+		"aria-live=\"polite\"",
+		"Sin materia prima registrada",
+		"deleteRaw",
+		"Promise.all",
+		"Centro de mando",
+	} {
+		if !strings.Contains(html, want) {
+			t.Fatalf("expected html to contain %q", want)
+		}
+	}
+}

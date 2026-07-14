@@ -111,7 +111,10 @@ func NewHandler(modules *Modules, sessions *auth.SessionStore, auditStore *audit
 		respondJSON(w, http.StatusOK, map[string]any{"roles": []string{"administrador", "almacen", "produccion", "ventas", "contabilidad", "auditoria"}})
 	})
 	mux.HandleFunc("/api/raw-materials", func(w http.ResponseWriter, r *http.Request) {
-		_, session, _ := currentSession(r, sessions)
+		session, ok := sessionOrUnauthorized(w, r, sessions)
+		if !ok {
+			return
+		}
 		role := session.Role
 		if r.Method == http.MethodGet {
 			if !core.Can(role, "raw-materials:read") {
@@ -152,7 +155,10 @@ func NewHandler(modules *Modules, sessions *auth.SessionStore, auditStore *audit
 		methodNotAllowed(w, "GET, POST")
 	})
 	mux.HandleFunc("/api/raw-materials/", func(w http.ResponseWriter, r *http.Request) {
-		_, session, _ := currentSession(r, sessions)
+		session, ok := sessionOrUnauthorized(w, r, sessions)
+		if !ok {
+			return
+		}
 		role := session.Role
 		if r.Method != http.MethodDelete {
 			methodNotAllowed(w, "DELETE")
@@ -171,7 +177,10 @@ func NewHandler(modules *Modules, sessions *auth.SessionStore, auditStore *audit
 		w.WriteHeader(http.StatusNoContent)
 	})
 	mux.HandleFunc("/api/finished-goods", func(w http.ResponseWriter, r *http.Request) {
-		_, session, _ := currentSession(r, sessions)
+		session, ok := sessionOrUnauthorized(w, r, sessions)
+		if !ok {
+			return
+		}
 		role := session.Role
 		if r.Method == http.MethodGet {
 			if !core.Can(role, "finished-goods:read") {
@@ -212,7 +221,10 @@ func NewHandler(modules *Modules, sessions *auth.SessionStore, auditStore *audit
 		methodNotAllowed(w, "GET, POST")
 	})
 	mux.HandleFunc("/api/finished-goods/", func(w http.ResponseWriter, r *http.Request) {
-		_, session, _ := currentSession(r, sessions)
+		session, ok := sessionOrUnauthorized(w, r, sessions)
+		if !ok {
+			return
+		}
 		role := session.Role
 		id := strings.TrimPrefix(r.URL.Path, "/api/finished-goods/")
 		if r.Method == http.MethodGet {
@@ -257,7 +269,10 @@ func NewHandler(modules *Modules, sessions *auth.SessionStore, auditStore *audit
 		notFound(w)
 	})
 	mux.HandleFunc("/api/packaging", func(w http.ResponseWriter, r *http.Request) {
-		_, session, _ := currentSession(r, sessions)
+		session, ok := sessionOrUnauthorized(w, r, sessions)
+		if !ok {
+			return
+		}
 		role := session.Role
 		if r.Method == http.MethodGet {
 			if !core.Can(role, "packaging:read") {
@@ -298,7 +313,10 @@ func NewHandler(modules *Modules, sessions *auth.SessionStore, auditStore *audit
 		methodNotAllowed(w, "GET, POST")
 	})
 	mux.HandleFunc("/api/packaging/", func(w http.ResponseWriter, r *http.Request) {
-		_, session, _ := currentSession(r, sessions)
+		session, ok := sessionOrUnauthorized(w, r, sessions)
+		if !ok {
+			return
+		}
 		role := session.Role
 		if r.Method != http.MethodDelete {
 			methodNotAllowed(w, "DELETE")
@@ -317,7 +335,10 @@ func NewHandler(modules *Modules, sessions *auth.SessionStore, auditStore *audit
 		w.WriteHeader(http.StatusNoContent)
 	})
 	mux.HandleFunc("/api/logistics", func(w http.ResponseWriter, r *http.Request) {
-		_, session, _ := currentSession(r, sessions)
+		session, ok := sessionOrUnauthorized(w, r, sessions)
+		if !ok {
+			return
+		}
 		role := session.Role
 		if r.Method == http.MethodGet {
 			if !core.Can(role, "logistics:read") {
@@ -358,7 +379,10 @@ func NewHandler(modules *Modules, sessions *auth.SessionStore, auditStore *audit
 		methodNotAllowed(w, "GET, POST")
 	})
 	mux.HandleFunc("/api/logistics/", func(w http.ResponseWriter, r *http.Request) {
-		_, session, _ := currentSession(r, sessions)
+		session, ok := sessionOrUnauthorized(w, r, sessions)
+		if !ok {
+			return
+		}
 		role := session.Role
 		if r.Method != http.MethodDelete {
 			methodNotAllowed(w, "DELETE")
@@ -377,7 +401,10 @@ func NewHandler(modules *Modules, sessions *auth.SessionStore, auditStore *audit
 		w.WriteHeader(http.StatusNoContent)
 	})
 	mux.HandleFunc("/api/invoices", func(w http.ResponseWriter, r *http.Request) {
-		_, session, _ := currentSession(r, sessions)
+		session, ok := sessionOrUnauthorized(w, r, sessions)
+		if !ok {
+			return
+		}
 		role := session.Role
 		if r.Method == http.MethodGet {
 			if !core.Can(role, "billing:read") {
@@ -418,7 +445,10 @@ func NewHandler(modules *Modules, sessions *auth.SessionStore, auditStore *audit
 		methodNotAllowed(w, "GET, POST")
 	})
 	mux.HandleFunc("/api/invoices/", func(w http.ResponseWriter, r *http.Request) {
-		_, session, _ := currentSession(r, sessions)
+		session, ok := sessionOrUnauthorized(w, r, sessions)
+		if !ok {
+			return
+		}
 		role := session.Role
 		path := strings.TrimPrefix(r.URL.Path, "/api/invoices/")
 		if strings.HasSuffix(path, "/issue") && r.Method == http.MethodPost {
@@ -453,7 +483,10 @@ func NewHandler(modules *Modules, sessions *auth.SessionStore, auditStore *audit
 		methodNotAllowed(w, "GET, POST")
 	})
 	mux.HandleFunc("/api/foxpro", func(w http.ResponseWriter, r *http.Request) {
-		_, session, _ := currentSession(r, sessions)
+		session, ok := sessionOrUnauthorized(w, r, sessions)
+		if !ok {
+			return
+		}
 		role := session.Role
 		if r.Method == http.MethodGet {
 			if !core.Can(role, "foxpro:read") {
@@ -471,7 +504,10 @@ func NewHandler(modules *Modules, sessions *auth.SessionStore, auditStore *audit
 		methodNotAllowed(w, "GET")
 	})
 	mux.HandleFunc("/api/foxpro/sync", func(w http.ResponseWriter, r *http.Request) {
-		_, session, _ := currentSession(r, sessions)
+		session, ok := sessionOrUnauthorized(w, r, sessions)
+		if !ok {
+			return
+		}
 		role := session.Role
 		if r.Method != http.MethodPost {
 			methodNotAllowed(w, "POST")
@@ -494,7 +530,10 @@ func NewHandler(modules *Modules, sessions *auth.SessionStore, auditStore *audit
 			w.WriteHeader(http.StatusMethodNotAllowed)
 			return
 		}
-		_, session, _ := currentSession(r, sessions)
+		session, ok := sessionOrUnauthorized(w, r, sessions)
+		if !ok {
+			return
+		}
 		role := session.Role
 		if !core.Can(role, "audit:read") {
 			respondJSON(w, http.StatusForbidden, map[string]any{"error": "forbidden"})
@@ -507,7 +546,10 @@ func NewHandler(modules *Modules, sessions *auth.SessionStore, auditStore *audit
 			w.WriteHeader(http.StatusMethodNotAllowed)
 			return
 		}
-		_, session, _ := currentSession(r, sessions)
+		session, ok := sessionOrUnauthorized(w, r, sessions)
+		if !ok {
+			return
+		}
 		role := session.Role
 		if !core.Can(role, "audit:read") {
 			respondJSON(w, http.StatusForbidden, map[string]any{"error": "forbidden"})
@@ -580,6 +622,15 @@ func currentSession(r *http.Request, sessions *auth.SessionStore) (string, auth.
 		return token, user, true
 	}
 	return "", auth.SessionUser{}, false
+}
+
+func sessionOrUnauthorized(w http.ResponseWriter, r *http.Request, sessions *auth.SessionStore) (auth.SessionUser, bool) {
+	_, session, ok := currentSession(r, sessions)
+	if !ok {
+		respondJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
+		return auth.SessionUser{}, false
+	}
+	return session, true
 }
 
 func actorName(session auth.SessionUser) string {
@@ -671,7 +722,17 @@ func errorMessageForStatus(status int, err error) string {
 
 func decodeJSON(body io.Reader, target any) error {
 	dec := json.NewDecoder(body)
-	return dec.Decode(target)
+	if err := dec.Decode(target); err != nil {
+		return err
+	}
+	var trailing json.RawMessage
+	if err := dec.Decode(&trailing); err != io.EOF {
+		if err == nil {
+			return errors.New("request body must contain a single JSON value")
+		}
+		return err
+	}
+	return nil
 }
 
 func decodeJSONBody(w http.ResponseWriter, r *http.Request, maxBytes int64, target any) error {

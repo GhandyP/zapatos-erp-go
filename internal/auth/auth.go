@@ -75,10 +75,11 @@ func (s *SessionStore) Get(token string) (SessionUser, bool) {
 }
 
 func GetBearerToken(value string) string {
-	if !strings.HasPrefix(value, "Bearer ") {
+	parts := strings.Fields(value)
+	if len(parts) != 2 || !strings.EqualFold(parts[0], "Bearer") {
 		return ""
 	}
-	return strings.TrimSpace(strings.TrimPrefix(value, "Bearer "))
+	return parts[1]
 }
 
 func randomHex(n int) string {

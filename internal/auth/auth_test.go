@@ -90,7 +90,8 @@ func TestGetBearerToken(t *testing.T) {
 		want  string
 	}{
 		{"Bearer abc123", "abc123"},
-		{"Bearer   abc123  ", "abc123"},
+		{"bearer abc123", "abc123"},
+		{"BEARER   abc123  ", "abc123"},
 		{"Basic abc123", ""},
 		{"", ""},
 		{"Bearer ", ""},

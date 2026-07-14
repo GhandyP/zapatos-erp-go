@@ -57,14 +57,14 @@ The resource endpoints follow the same pattern:
 - `GET /api/logistics`
 - `POST /api/logistics`
 - `DELETE /api/logistics/{id}`
-- `GET /api/billing`
-- `POST /api/billing`
-- `GET /api/billing/{id}`
-- `PATCH /api/billing/{id}`
+- `GET /api/invoices`
+- `POST /api/invoices`
+- `GET /api/invoices/{id}`
+- `POST /api/invoices/{id}/issue`
 - `GET /api/audit`
 - `GET /api/audit/export`
 - `POST /api/foxpro/sync`
-- `GET /api/foxpro/status`
+- `GET /api/foxpro`
 
 ### Common responses
 
