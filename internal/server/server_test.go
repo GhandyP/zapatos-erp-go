@@ -14,6 +14,8 @@ import (
 
 	"zapatos-erp-go/internal/audit"
 	"zapatos-erp-go/internal/auth"
+	"zapatos-erp-go/internal/integrations/foxpro"
+	"zapatos-erp-go/internal/modules/billing"
 	"zapatos-erp-go/internal/modules/finishedgoods"
 	"zapatos-erp-go/internal/modules/logistics"
 	"zapatos-erp-go/internal/modules/packaging"
@@ -286,6 +288,223 @@ func TestHandlerReloadsPersistentSessionAndAuditOrder(t *testing.T) {
 	}
 	if !reflect.DeepEqual(events, want) {
 		t.Fatalf("events = %#v, want %#v", events, want)
+	}
+}
+
+func TestHTTPContractCoreAPIResourcesDocumentCurrentRoutes(t *testing.T) {
+	contract, err := os.ReadFile("../../docs/http-contract.md")
+	if err != nil {
+		t.Fatalf("read HTTP contract: %v", err)
+	}
+
+	var section []string
+	inSection := false
+	foundSection := false
+	for _, line := range strings.Split(string(contract), "\n") {
+		if line == "## Core API resources" {
+			foundSection = true
+			inSection = true
+			continue
+		}
+		if inSection && strings.HasPrefix(line, "## ") {
+			break
+		}
+		if inSection {
+			section = append(section, line)
+		}
+	}
+	if !foundSection {
+		t.Fatal("HTTP contract is missing the ## Core API resources section")
+	}
+	sectionText := strings.Join(section, "\n")
+
+	for _, route := range []string{
+		"GET /api/invoices",
+		"POST /api/invoices",
+		"GET /api/invoices/{id}",
+		"POST /api/invoices/{id}/issue",
+		"GET /api/foxpro",
+		"POST /api/foxpro/sync",
+	} {
+		if !strings.Contains(sectionText, "`"+route+"`") {
+			t.Errorf("Core API resources section does not document %q", route)
+		}
+	}
+
+	for _, obsoleteRoute := range []string{
+		"/api/billing",
+		"/api/foxpro/status",
+		"PATCH /api/invoices",
+	} {
+		if strings.Contains(sectionText, obsoleteRoute) {
+			t.Errorf("Core API resources section still documents obsolete route %q", obsoleteRoute)
+		}
+	}
+}
+
+func TestHandlerInvoiceAndFoxProRuntimeContract(t *testing.T) {
+	h := httpContractTestHandler(t)
+	token := loginAs(t, h, "admin", "admin123")
+
+	resp := performRequest(t, h, http.MethodGet, "/api/invoices", nil, token)
+	if resp.Code != http.StatusOK {
+		t.Fatalf("GET /api/invoices = %d, want 200: %s", resp.Code, resp.Body.String())
+	}
+	if got := resp.Header().Get("Content-Type"); got != "application/json; charset=utf-8" {
+		t.Fatalf("GET /api/invoices Content-Type = %q", got)
+	}
+	var invoices []billing.Invoice
+	if err := json.Unmarshal(resp.Body.Bytes(), &invoices); err != nil {
+		t.Fatalf("decode invoice list: %v", err)
+	}
+	if len(invoices) != 0 {
+		t.Fatalf("initial invoice list has %d entries, want 0", len(invoices))
+	}
+
+	resp = performRequest(t, h, http.MethodPost, "/api/invoices", map[string]any{
+		"id": "inv-contract", "customerId": "customer-1", "total": 100, "tax": 21, "status": "draft",
+	}, token)
+	if resp.Code != http.StatusCreated {
+		t.Fatalf("POST /api/invoices = %d, want 201: %s", resp.Code, resp.Body.String())
+	}
+	var created billing.Invoice
+	if err := json.Unmarshal(resp.Body.Bytes(), &created); err != nil {
+		t.Fatalf("decode created invoice: %v", err)
+	}
+	if created.ID != "inv-contract" || created.CustomerID != "customer-1" || created.Total != 100 || created.Tax != 21 || created.Status != billing.StatusDraft {
+		t.Fatalf("created invoice = %#v, want stable invoice fields", created)
+	}
+
+	resp = performRequest(t, h, http.MethodGet, "/api/invoices", nil, token)
+	if resp.Code != http.StatusOK {
+		t.Fatalf("GET /api/invoices after create = %d, want 200: %s", resp.Code, resp.Body.String())
+	}
+	if err := json.Unmarshal(resp.Body.Bytes(), &invoices); err != nil {
+		t.Fatalf("decode populated invoice list: %v", err)
+	}
+	if len(invoices) != 1 || invoices[0].ID != "inv-contract" {
+		t.Fatalf("invoice list = %#v, want the saved invoice", invoices)
+	}
+
+	resp = performRequest(t, h, http.MethodGet, "/api/invoices/inv-contract", nil, token)
+	if resp.Code != http.StatusOK {
+		t.Fatalf("GET /api/invoices/{id} = %d, want 200: %s", resp.Code, resp.Body.String())
+	}
+	var fetched billing.Invoice
+	if err := json.Unmarshal(resp.Body.Bytes(), &fetched); err != nil {
+		t.Fatalf("decode fetched invoice: %v", err)
+	}
+	if fetched.ID != "inv-contract" || fetched.CustomerID != "customer-1" || fetched.Status != billing.StatusDraft {
+		t.Fatalf("fetched invoice = %#v, want saved invoice fields", fetched)
+	}
+
+	resp = performRequest(t, h, http.MethodPost, "/api/invoices/inv-contract/issue", nil, token)
+	if resp.Code != http.StatusOK {
+		t.Fatalf("POST /api/invoices/{id}/issue = %d, want 200: %s", resp.Code, resp.Body.String())
+	}
+	var issued billing.Invoice
+	if err := json.Unmarshal(resp.Body.Bytes(), &issued); err != nil {
+		t.Fatalf("decode issued invoice: %v", err)
+	}
+	if issued.ID != "inv-contract" || issued.Status != billing.StatusIssued {
+		t.Fatalf("issued invoice = %#v, want same ID with issued status", issued)
+	}
+
+	resp = performRequest(t, h, http.MethodGet, "/api/invoices/missing", nil, token)
+	assertContractError(t, resp, http.StatusNotFound, "Invoice not found: missing")
+	resp = performRequest(t, h, http.MethodPost, "/api/invoices", map[string]any{"customerId": "", "total": 1, "tax": 0}, token)
+	assertContractError(t, resp, http.StatusBadRequest, "Invoice requires customerId")
+
+	resp = performRequest(t, h, http.MethodGet, "/api/foxpro", nil, token)
+	if resp.Code != http.StatusOK {
+		t.Fatalf("GET /api/foxpro = %d, want 200: %s", resp.Code, resp.Body.String())
+	}
+	var status foxpro.SyncResult
+	assertContractJSONFields(t, resp, "lastSyncAt", "imported", "updated", "failed", "pendingIssued", "syncedIssued")
+	if err := json.Unmarshal(resp.Body.Bytes(), &status); err != nil {
+		t.Fatalf("decode FoxPro status: %v", err)
+	}
+	if status.LastSyncAt != nil || status.Imported != 0 || status.Updated != 0 || status.Failed != 0 || status.PendingIssued != 1 || status.SyncedIssued != 0 {
+		t.Fatalf("initial FoxPro result = %#v, want one pending issued invoice and zero sync counts", status)
+	}
+
+	resp = performRequest(t, h, http.MethodPost, "/api/foxpro/sync", nil, token)
+	if resp.Code != http.StatusOK {
+		t.Fatalf("POST /api/foxpro/sync = %d, want 200: %s", resp.Code, resp.Body.String())
+	}
+	assertContractJSONFields(t, resp, "lastSyncAt", "imported", "updated", "failed", "pendingIssued", "syncedIssued")
+	if err := json.Unmarshal(resp.Body.Bytes(), &status); err != nil {
+		t.Fatalf("decode FoxPro sync result: %v", err)
+	}
+	if status.LastSyncAt == nil || *status.LastSyncAt == "" || status.Imported != 1 || status.Updated != 0 || status.Failed != 0 || status.PendingIssued != 0 || status.SyncedIssued != 1 {
+		t.Fatalf("FoxPro sync result = %#v, want non-empty timestamp and stable counts", status)
+	}
+}
+
+func TestHandlerAuthStatusDistinction(t *testing.T) {
+	h := httpContractTestHandler(t)
+	for _, test := range []struct {
+		name  string
+		token string
+	}{
+		{name: "missing token"},
+		{name: "invalid token", token: "not-a-session"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			me := performRequest(t, h, http.MethodGet, "/api/me", nil, test.token)
+			assertContractError(t, me, http.StatusUnauthorized, "unauthorized")
+
+			resource := performRequest(t, h, http.MethodGet, "/api/invoices", nil, test.token)
+			assertContractError(t, resource, http.StatusForbidden, "forbidden")
+		})
+	}
+}
+
+func httpContractTestHandler(t *testing.T) http.Handler {
+	t.Helper()
+	root := t.TempDir()
+	invoices := billing.New(store.NewMemoryRepository([]billing.Invoice{}, func(v billing.Invoice) string { return v.ID }))
+	return NewHandler(&Modules{
+		RawMaterials:  rawSvc(),
+		FinishedGoods: finishedSvc(),
+		Packaging:     packagingSvc(),
+		Logistics:     logisticsSvc(),
+		Billing:       invoices,
+		Foxpro:        foxpro.New(invoices),
+	}, auth.NewSessionStore(filepath.Join(root, "sessions.json"), []auth.UserAccount{
+		auth.NewUserAccount("admin", "admin123", "administrador"),
+	}), audit.NewStore(filepath.Join(root, "audit.json")), web.NewUI())
+}
+
+func assertContractJSONFields(t *testing.T, resp *httptest.ResponseRecorder, fields ...string) {
+	t.Helper()
+	var payload map[string]json.RawMessage
+	if err := json.Unmarshal(resp.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode JSON response fields: %v", err)
+	}
+	for _, field := range fields {
+		if _, ok := payload[field]; !ok {
+			t.Errorf("JSON response is missing field %q: %s", field, resp.Body.String())
+		}
+	}
+}
+
+func assertContractError(t *testing.T, resp *httptest.ResponseRecorder, wantStatus int, wantError string) {
+	t.Helper()
+	if resp.Code != wantStatus {
+		t.Fatalf("status = %d, want %d: %s", resp.Code, wantStatus, resp.Body.String())
+	}
+	if got := resp.Header().Get("Content-Type"); got != "application/json; charset=utf-8" {
+		t.Fatalf("error Content-Type = %q, want application/json; charset=utf-8", got)
+	}
+	var payload struct {
+		Error string `json:"error"`
+	}
+	if err := json.Unmarshal(resp.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode error response: %v", err)
+	}
+	if payload.Error != wantError {
+		t.Fatalf("error = %q, want %q", payload.Error, wantError)
 	}
 }
 
