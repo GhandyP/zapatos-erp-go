@@ -2,7 +2,9 @@ package server
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -29,12 +31,13 @@ func TestHandlerDimensionsFlows(t *testing.T) {
 	sessions := auth.NewSessionStore(filepath.Join(root, "sessions.json"), []auth.UserAccount{
 		auth.NewUserAccount("admin", "admin123", "administrador"),
 	})
+	auditStore := audit.NewStore(filepath.Join(root, "audit.json"))
 	h := NewHandler(&Modules{
 		RawMaterials:  rawSvc(),
 		FinishedGoods: finishedSvc(),
 		Packaging:     packagingSvc(),
 		Logistics:     logisticsSvc(),
-	}, sessions, audit.NewStore(filepath.Join(root, "audit.json")), web.NewUI())
+	}, sessions, auditStore, web.NewUI())
 
 	token := loginAs(t, h, "admin", "admin123")
 
@@ -78,6 +81,10 @@ func TestHandlerDimensionsFlows(t *testing.T) {
 	if resp.Code != http.StatusCreated {
 		t.Fatalf("expected finished goods 201, got %d: %s", resp.Code, resp.Body.String())
 	}
+	var createdFinished finishedgoods.FinishedProductVariant
+	if err := json.Unmarshal(resp.Body.Bytes(), &createdFinished); err != nil {
+		t.Fatalf("decode created finished good: %v", err)
+	}
 
 	resp = performRequest(t, h, http.MethodPost, "/api/raw-materials", map[string]any{
 		"id":         "rm-1",
@@ -88,6 +95,31 @@ func TestHandlerDimensionsFlows(t *testing.T) {
 	}, token)
 	if resp.Code != http.StatusCreated {
 		t.Fatalf("expected raw materials 201, got %d: %s", resp.Code, resp.Body.String())
+	}
+
+	wantAuditEntities := map[string]bool{
+		"packaging:pkg-1":                      false,
+		"logistics:slot-1":                     false,
+		"finished-goods:" + createdFinished.ID: false,
+		"raw-materials:rm-1":                   false,
+	}
+	for _, event := range auditStore.List() {
+		if event.Actor != "admin" || event.Action != "saved" {
+			t.Fatalf("legacy audit event = %#v, want admin saved event", event)
+		}
+		if _, ok := wantAuditEntities[event.Entity]; !ok {
+			t.Errorf("unexpected legacy audit entity %q", event.Entity)
+			continue
+		}
+		wantAuditEntities[event.Entity] = true
+	}
+	if len(auditStore.List()) != len(wantAuditEntities) {
+		t.Fatalf("legacy audit events = %d, want %d for raw materials, finished goods, packaging, and logistics", len(auditStore.List()), len(wantAuditEntities))
+	}
+	for entity, recorded := range wantAuditEntities {
+		if !recorded {
+			t.Errorf("legacy constructor did not audit %q", entity)
+		}
 	}
 
 	resp = performRequest(t, h, http.MethodGet, "/app", nil, "")
@@ -343,7 +375,7 @@ func TestHTTPContractCoreAPIResourcesDocumentCurrentRoutes(t *testing.T) {
 }
 
 func TestHandlerInvoiceAndFoxProRuntimeContract(t *testing.T) {
-	h := httpContractTestHandler(t)
+	h, auditStore := httpContractTestHandler(t)
 	token := loginAs(t, h, "admin", "admin123")
 
 	resp := performRequest(t, h, http.MethodGet, "/api/invoices", nil, token)
@@ -409,6 +441,10 @@ func TestHandlerInvoiceAndFoxProRuntimeContract(t *testing.T) {
 	if issued.ID != "inv-contract" || issued.Status != billing.StatusIssued {
 		t.Fatalf("issued invoice = %#v, want same ID with issued status", issued)
 	}
+	invoiceAudit := auditStore.List()
+	if len(invoiceAudit) != 2 || invoiceAudit[0].Actor != "admin" || invoiceAudit[0].Action != "saved" || invoiceAudit[0].Entity != "billing:inv-contract" || invoiceAudit[1].Actor != "admin" || invoiceAudit[1].Action != "issued" || invoiceAudit[1].Entity != "billing:inv-contract" {
+		t.Fatalf("legacy invoice audit events = %#v, want saved then issued for billing:inv-contract", invoiceAudit)
+	}
 
 	resp = performRequest(t, h, http.MethodGet, "/api/invoices/missing", nil, token)
 	assertContractError(t, resp, http.StatusNotFound, "Invoice not found: missing")
@@ -442,7 +478,7 @@ func TestHandlerInvoiceAndFoxProRuntimeContract(t *testing.T) {
 }
 
 func TestHandlerAuthStatusDistinction(t *testing.T) {
-	h := httpContractTestHandler(t)
+	h, _ := httpContractTestHandler(t)
 	for _, test := range []struct {
 		name  string
 		token string
@@ -460,11 +496,12 @@ func TestHandlerAuthStatusDistinction(t *testing.T) {
 	}
 }
 
-func httpContractTestHandler(t *testing.T) http.Handler {
+func httpContractTestHandler(t *testing.T) (http.Handler, *audit.Store) {
 	t.Helper()
 	root := t.TempDir()
 	invoices := billing.New(store.NewMemoryRepository([]billing.Invoice{}, func(v billing.Invoice) string { return v.ID }))
-	return NewHandler(&Modules{
+	auditStore := audit.NewStore(filepath.Join(root, "audit.json"))
+	handler := NewHandler(&Modules{
 		RawMaterials:  rawSvc(),
 		FinishedGoods: finishedSvc(),
 		Packaging:     packagingSvc(),
@@ -473,7 +510,8 @@ func httpContractTestHandler(t *testing.T) http.Handler {
 		Foxpro:        foxpro.New(invoices),
 	}, auth.NewSessionStore(filepath.Join(root, "sessions.json"), []auth.UserAccount{
 		auth.NewUserAccount("admin", "admin123", "administrador"),
-	}), audit.NewStore(filepath.Join(root, "audit.json")), web.NewUI())
+	}), auditStore, web.NewUI())
+	return handler, auditStore
 }
 
 func assertContractJSONFields(t *testing.T, resp *httptest.ResponseRecorder, fields ...string) {
@@ -585,4 +623,314 @@ func observabilityTestHandler(t *testing.T) http.Handler {
 	}, auth.NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"), []auth.UserAccount{
 		auth.NewUserAccount("admin", "admin123", "administrador"),
 	}), audit.NewStore(filepath.Join(t.TempDir(), "audit.json")), web.NewUI())
+}
+
+type transactionScopeTestContextKey struct{}
+
+type transactionAuditRecord struct {
+	actor  string
+	action string
+	entity string
+}
+
+type recordingTransactionScope struct {
+	services     TransactionServices
+	runErr       error
+	auditErr     error
+	runCount     int
+	auditRecords []transactionAuditRecord
+	contextValue any
+}
+
+func newRecordingTransactionScope() *recordingTransactionScope {
+	scope := &recordingTransactionScope{}
+	scope.services = TransactionServices{
+		RawMaterials: rawmaterials.New(store.NewMemoryRepository([]rawmaterials.RawMaterial{
+			{ID: "rm-existing", Name: "Leather", Unit: "m2"},
+		}, func(item rawmaterials.RawMaterial) string { return item.ID })),
+		FinishedGoods: finishedgoods.New(store.NewMemoryRepository([]finishedgoods.FinishedProductVariant{
+			{ID: "fg-existing", Style: "Oxford", Size: "40", Color: "Negro", Stock: 2},
+		}, func(item finishedgoods.FinishedProductVariant) string { return item.ID })),
+		Packaging: packaging.New(store.NewMemoryRepository([]packaging.PackagingSpec{
+			{ID: "pkg-existing", Name: "Caja", TransportMode: "camion", MaxUnits: 2},
+		}, func(item packaging.PackagingSpec) string { return item.ID })),
+		Logistics: logistics.New(store.NewMemoryRepository([]logistics.StorageSlot{
+			{ID: "slot-existing", Name: "Rack A", Zone: "Z1", CapacityUnits: 2},
+		}, func(item logistics.StorageSlot) string { return item.ID })),
+		Billing: billing.New(store.NewMemoryRepository([]billing.Invoice{
+			{ID: "inv-existing", CustomerID: "customer-1", Total: 100, Tax: 21, Status: billing.StatusDraft},
+		}, func(item billing.Invoice) string { return item.ID })),
+	}
+	scope.services.RecordAudit = func(actor, action, entity string) error {
+		scope.auditRecords = append(scope.auditRecords, transactionAuditRecord{actor: actor, action: action, entity: entity})
+		return scope.auditErr
+	}
+	return scope
+}
+
+func (scope *recordingTransactionScope) Run(ctx context.Context, operation func(TransactionServices) error) error {
+	scope.runCount++
+	scope.contextValue = ctx.Value(transactionScopeTestContextKey{})
+	if err := operation(scope.services); err != nil {
+		return err
+	}
+	return scope.runErr
+}
+
+func transactionTestModules() *Modules {
+	return &Modules{
+		RawMaterials:  rawSvc(),
+		FinishedGoods: finishedSvc(),
+		Packaging:     packagingSvc(),
+		Logistics:     logisticsSvc(),
+		Billing:       billing.New(store.NewMemoryRepository([]billing.Invoice{}, func(item billing.Invoice) string { return item.ID })),
+	}
+}
+
+func transactionTestHandler(t *testing.T, modules *Modules, scope TransactionScope) http.Handler {
+	t.Helper()
+	root := t.TempDir()
+	return NewHandlerWithTransactionScope(modules, auth.NewSessionStore(filepath.Join(root, "sessions.json"), []auth.UserAccount{
+		auth.NewUserAccount("admin", "admin123", "administrador"),
+	}), audit.NewStore(filepath.Join(root, "audit.json")), web.NewUI(), scope)
+}
+
+type repeatedCallbackTransactionScope struct{}
+
+func (repeatedCallbackTransactionScope) Run(_ context.Context, operation func(TransactionServices) error) error {
+	_ = operation(TransactionServices{})
+	_ = operation(TransactionServices{})
+	return nil
+}
+
+func TestRunMutationRejectsRepeatedCallback(t *testing.T) {
+	operationCalls := 0
+	err := runMutation(context.Background(), repeatedCallbackTransactionScope{}, func(TransactionServices) error {
+		operationCalls++
+		return nil
+	})
+	if err == nil {
+		t.Fatal("runMutation succeeded after the scope invoked its callback twice")
+	}
+	if operationCalls != 1 {
+		t.Fatalf("mutation operation ran %d times, want once", operationCalls)
+	}
+}
+
+func TestTransactionalHandlerRunsAllPersistedMutationsInsideScope(t *testing.T) {
+	dimensions := map[string]any{"lengthCm": 10, "widthCm": 12, "heightCm": 14, "weightKg": 1}
+	tests := []struct {
+		name   string
+		method string
+		path   string
+		body   map[string]any
+		status int
+		action string
+		entity string
+		verify func(*testing.T, TransactionServices)
+	}{
+		{
+			name: "raw material create", method: http.MethodPost, path: "/api/raw-materials",
+			body:   map[string]any{"id": "rm-new", "name": "Leather", "unit": "m2", "minStock": 1, "dimensions": dimensions},
+			status: http.StatusCreated, action: "saved", entity: "raw-materials:rm-new",
+			verify: func(t *testing.T, services TransactionServices) {
+				if _, err := services.RawMaterials.Get("rm-new"); err != nil {
+					t.Fatalf("transaction-bound raw material was not saved: %v", err)
+				}
+			},
+		},
+		{
+			name: "raw material delete", method: http.MethodDelete, path: "/api/raw-materials/rm-existing",
+			status: http.StatusNoContent, action: "deleted", entity: "raw-materials:rm-existing",
+			verify: func(t *testing.T, services TransactionServices) {
+				if _, err := services.RawMaterials.Get("rm-existing"); err == nil {
+					t.Fatal("transaction-bound raw material was not deleted")
+				}
+			},
+		},
+		{
+			name: "finished good create", method: http.MethodPost, path: "/api/finished-goods",
+			body:   map[string]any{"id": "fg-new", "style": "Oxford", "size": "40", "color": "Negro", "stock": 1, "dimensions": dimensions},
+			status: http.StatusCreated, action: "saved", entity: "finished-goods:fg-new",
+			verify: func(t *testing.T, services TransactionServices) {
+				if _, err := services.FinishedGoods.Get("fg-new"); err != nil {
+					t.Fatalf("transaction-bound finished good was not saved: %v", err)
+				}
+			},
+		},
+		{
+			name: "finished good stock adjustment", method: http.MethodPatch, path: "/api/finished-goods/fg-existing",
+			body:   map[string]any{"delta": 1, "note": "count"},
+			status: http.StatusOK, action: "adjusted stock", entity: "finished-goods:fg-existing",
+			verify: func(t *testing.T, services TransactionServices) {
+				item, err := services.FinishedGoods.Get("fg-existing")
+				if err != nil || item.Stock != 3 {
+					t.Fatalf("transaction-bound stock = %d, err %v; want 3, nil", item.Stock, err)
+				}
+			},
+		},
+		{
+			name: "packaging create", method: http.MethodPost, path: "/api/packaging",
+			body:   map[string]any{"id": "pkg-new", "name": "Caja", "transportMode": "camion", "maxUnits": 10, "dimensions": dimensions},
+			status: http.StatusCreated, action: "saved", entity: "packaging:pkg-new",
+			verify: func(t *testing.T, services TransactionServices) {
+				if _, err := services.Packaging.Get("pkg-new"); err != nil {
+					t.Fatalf("transaction-bound packaging was not saved: %v", err)
+				}
+			},
+		},
+		{
+			name: "packaging delete", method: http.MethodDelete, path: "/api/packaging/pkg-existing",
+			status: http.StatusNoContent, action: "deleted", entity: "packaging:pkg-existing",
+			verify: func(t *testing.T, services TransactionServices) {
+				if _, err := services.Packaging.Get("pkg-existing"); err == nil {
+					t.Fatal("transaction-bound packaging was not deleted")
+				}
+			},
+		},
+		{
+			name: "logistics create", method: http.MethodPost, path: "/api/logistics",
+			body:   map[string]any{"id": "slot-new", "name": "Rack B", "zone": "Z2", "capacityUnits": 8, "dimensions": dimensions},
+			status: http.StatusCreated, action: "saved", entity: "logistics:slot-new",
+			verify: func(t *testing.T, services TransactionServices) {
+				if _, err := services.Logistics.Get("slot-new"); err != nil {
+					t.Fatalf("transaction-bound logistics slot was not saved: %v", err)
+				}
+			},
+		},
+		{
+			name: "logistics delete", method: http.MethodDelete, path: "/api/logistics/slot-existing",
+			status: http.StatusNoContent, action: "deleted", entity: "logistics:slot-existing",
+			verify: func(t *testing.T, services TransactionServices) {
+				if _, err := services.Logistics.Get("slot-existing"); err == nil {
+					t.Fatal("transaction-bound logistics slot was not deleted")
+				}
+			},
+		},
+		{
+			name: "invoice create", method: http.MethodPost, path: "/api/invoices",
+			body:   map[string]any{"id": "inv-new", "customerId": "customer-1", "total": 100, "tax": 21, "status": "draft"},
+			status: http.StatusCreated, action: "saved", entity: "billing:inv-new",
+			verify: func(t *testing.T, services TransactionServices) {
+				if _, err := services.Billing.Get("inv-new"); err != nil {
+					t.Fatalf("transaction-bound invoice was not saved: %v", err)
+				}
+			},
+		},
+		{
+			name: "invoice issue", method: http.MethodPost, path: "/api/invoices/inv-existing/issue",
+			status: http.StatusOK, action: "issued", entity: "billing:inv-existing",
+			verify: func(t *testing.T, services TransactionServices) {
+				item, err := services.Billing.Get("inv-existing")
+				if err != nil || item.Status != billing.StatusIssued {
+					t.Fatalf("transaction-bound invoice status = %q, err %v; want issued, nil", item.Status, err)
+				}
+			},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			scope := newRecordingTransactionScope()
+			h := transactionTestHandler(t, transactionTestModules(), scope)
+			token := loginAs(t, h, "admin", "admin123")
+			resp := performTransactionRequest(t, h, test.method, test.path, test.body, token)
+			if resp.Code != test.status {
+				t.Fatalf("status = %d, want %d: %s", resp.Code, test.status, resp.Body.String())
+			}
+			if scope.runCount != 1 {
+				t.Fatalf("transaction scope called %d times, want once", scope.runCount)
+			}
+			if scope.contextValue != "request-context" {
+				t.Fatalf("scope context value = %#v, want request context", scope.contextValue)
+			}
+			if len(scope.auditRecords) != 1 {
+				t.Fatalf("audit callbacks = %d, want one", len(scope.auditRecords))
+			}
+			if got := scope.auditRecords[0]; got != (transactionAuditRecord{actor: "admin", action: test.action, entity: test.entity}) {
+				t.Fatalf("audit record = %#v, want actor admin, action %q, entity %q", got, test.action, test.entity)
+			}
+			test.verify(t, scope.services)
+		})
+	}
+}
+
+func TestTransactionalHandlerAuditsOnlyAfterServiceSuccess(t *testing.T) {
+	scope := newRecordingTransactionScope()
+	h := transactionTestHandler(t, transactionTestModules(), scope)
+	token := loginAs(t, h, "admin", "admin123")
+	resp := performTransactionRequest(t, h, http.MethodPost, "/api/raw-materials", map[string]any{
+		"id": "", "name": "Leather", "unit": "m2", "minStock": 1,
+	}, token)
+	if resp.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400: %s", resp.Code, resp.Body.String())
+	}
+	if scope.runCount != 1 {
+		t.Fatalf("transaction scope called %d times, want once", scope.runCount)
+	}
+	if len(scope.auditRecords) != 0 {
+		t.Fatalf("audit callbacks = %d, want none after service failure", len(scope.auditRecords))
+	}
+	if !strings.Contains(resp.Body.String(), "Raw material requires id and name") {
+		t.Fatalf("service validation response changed: %s", resp.Body.String())
+	}
+}
+
+func TestTransactionalHandlerFailsClosedOnScopeAndAuditErrors(t *testing.T) {
+	tests := []struct {
+		name        string
+		configure   func(*recordingTransactionScope)
+		useNilScope bool
+	}{
+		{name: "scope run error", configure: func(scope *recordingTransactionScope) { scope.runErr = errors.New("commit failed") }},
+		{name: "audit error", configure: func(scope *recordingTransactionScope) { scope.auditErr = errors.New("audit insert failed") }},
+		{name: "missing scope", useNilScope: true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			modules := transactionTestModules()
+			var scope *recordingTransactionScope
+			var injectedScope TransactionScope
+			if !test.useNilScope {
+				scope = newRecordingTransactionScope()
+				test.configure(scope)
+				injectedScope = scope
+			}
+			h := transactionTestHandler(t, modules, injectedScope)
+			token := loginAs(t, h, "admin", "admin123")
+			resp := performTransactionRequest(t, h, http.MethodPost, "/api/raw-materials", map[string]any{
+				"id": "rm-new", "name": "Leather", "unit": "m2", "minStock": 1,
+				"dimensions": map[string]any{"lengthCm": 1, "widthCm": 1, "heightCm": 1, "weightKg": 1},
+			}, token)
+			if resp.Code != http.StatusInternalServerError {
+				t.Fatalf("status = %d, want 500: %s", resp.Code, resp.Body.String())
+			}
+			if strings.Contains(resp.Body.String(), "commit failed") || strings.Contains(resp.Body.String(), "audit insert failed") {
+				t.Fatalf("internal transaction error leaked: %s", resp.Body.String())
+			}
+			if _, err := modules.RawMaterials.Get("rm-new"); err == nil {
+				t.Fatal("transactional failure fell back to the legacy module service")
+			}
+			if scope != nil && scope.runCount != 1 {
+				t.Fatalf("transaction scope called %d times, want once", scope.runCount)
+			}
+		})
+	}
+}
+
+func performTransactionRequest(t *testing.T, h http.Handler, method, path string, body map[string]any, token string) *httptest.ResponseRecorder {
+	t.Helper()
+	var payload []byte
+	if body != nil {
+		payload, _ = json.Marshal(body)
+	}
+	req := httptest.NewRequest(method, path, bytes.NewReader(payload))
+	req = req.WithContext(context.WithValue(req.Context(), transactionScopeTestContextKey{}, "request-context"))
+	req.Header.Set("Authorization", "Bearer "+token)
+	if body != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	return rec
 }

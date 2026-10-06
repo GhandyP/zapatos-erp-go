@@ -60,6 +60,17 @@ func Run(ctx context.Context, addr string, modules *Modules, sessions *auth.Sess
 }
 
 func NewHandler(modules *Modules, sessions *auth.SessionStore, auditStore *audit.Store, ui *web.UI) http.Handler {
+	legacyScope := &transitionalLegacyJSONTransactionScope{modules: modules, auditStore: auditStore}
+	return newHandler(modules, sessions, auditStore, ui, legacyScope)
+}
+
+// NewHandlerWithTransactionScope constructs a handler whose persisted mutations
+// use the supplied transaction scope. A nil scope fails closed on every mutation.
+func NewHandlerWithTransactionScope(modules *Modules, sessions *auth.SessionStore, auditStore *audit.Store, ui *web.UI, transactionScope TransactionScope) http.Handler {
+	return newHandler(modules, sessions, auditStore, ui, transactionScope)
+}
+
+func newHandler(modules *Modules, sessions *auth.SessionStore, auditStore *audit.Store, ui *web.UI, transactionScope TransactionScope) http.Handler {
 	obs := observability.New(slog.New(slog.NewJSONHandler(os.Stdout, nil)))
 	mux := http.NewServeMux()
 	mux.Handle("/metrics", obs.MetricsHandler())
@@ -140,12 +151,22 @@ func NewHandler(modules *Modules, sessions *auth.SessionStore, auditStore *audit
 				respondError(w, http.StatusBadRequest, err)
 				return
 			}
-			saved, err := modules.RawMaterials.Upsert(item)
+			var saved rawmaterials.RawMaterial
+			err := runMutation(r.Context(), transactionScope, func(services TransactionServices) error {
+				if services.RawMaterials == nil {
+					return errors.New("transaction scope has no raw-materials service")
+				}
+				var err error
+				saved, err = services.RawMaterials.Upsert(item)
+				if err != nil {
+					return mutationServiceError(err)
+				}
+				return recordMutationAudit(services, actorName(session), "saved", "raw-materials:"+saved.ID)
+			})
 			if err != nil {
-				respondServiceError(w, err)
+				respondMutationError(w, err)
 				return
 			}
-			auditStore.Record(actorName(session), "saved", "raw-materials:"+saved.ID)
 			respondJSON(w, http.StatusCreated, saved)
 			return
 		}
@@ -163,11 +184,19 @@ func NewHandler(modules *Modules, sessions *auth.SessionStore, auditStore *audit
 			return
 		}
 		id := strings.TrimPrefix(r.URL.Path, "/api/raw-materials/")
-		if err := modules.RawMaterials.Remove(id); err != nil {
-			respondServiceError(w, err)
+		err := runMutation(r.Context(), transactionScope, func(services TransactionServices) error {
+			if services.RawMaterials == nil {
+				return errors.New("transaction scope has no raw-materials service")
+			}
+			if err := services.RawMaterials.Remove(id); err != nil {
+				return mutationServiceError(err)
+			}
+			return recordMutationAudit(services, actorName(session), "deleted", "raw-materials:"+id)
+		})
+		if err != nil {
+			respondMutationError(w, err)
 			return
 		}
-		auditStore.Record(actorName(session), "deleted", "raw-materials:"+id)
 		w.WriteHeader(http.StatusNoContent)
 	})
 	mux.HandleFunc("/api/finished-goods", func(w http.ResponseWriter, r *http.Request) {
@@ -200,12 +229,22 @@ func NewHandler(modules *Modules, sessions *auth.SessionStore, auditStore *audit
 				respondError(w, http.StatusBadRequest, err)
 				return
 			}
-			saved, err := modules.FinishedGoods.Upsert(item)
+			var saved finishedgoods.FinishedProductVariant
+			err := runMutation(r.Context(), transactionScope, func(services TransactionServices) error {
+				if services.FinishedGoods == nil {
+					return errors.New("transaction scope has no finished-goods service")
+				}
+				var err error
+				saved, err = services.FinishedGoods.Upsert(item)
+				if err != nil {
+					return mutationServiceError(err)
+				}
+				return recordMutationAudit(services, actorName(session), "saved", "finished-goods:"+saved.ID)
+			})
 			if err != nil {
-				respondServiceError(w, err)
+				respondMutationError(w, err)
 				return
 			}
-			auditStore.Record(actorName(session), "saved", "finished-goods:"+saved.ID)
 			respondJSON(w, http.StatusCreated, saved)
 			return
 		}
@@ -245,12 +284,22 @@ func NewHandler(modules *Modules, sessions *auth.SessionStore, auditStore *audit
 				respondError(w, http.StatusBadRequest, err)
 				return
 			}
-			item, err := modules.FinishedGoods.AdjustStock(id, payload.Delta, payload.Note)
+			var item finishedgoods.FinishedProductVariant
+			err := runMutation(r.Context(), transactionScope, func(services TransactionServices) error {
+				if services.FinishedGoods == nil {
+					return errors.New("transaction scope has no finished-goods service")
+				}
+				var err error
+				item, err = services.FinishedGoods.AdjustStock(id, payload.Delta, payload.Note)
+				if err != nil {
+					return mutationServiceError(err)
+				}
+				return recordMutationAudit(services, actorName(session), "adjusted stock", "finished-goods:"+item.ID)
+			})
 			if err != nil {
-				respondServiceError(w, err)
+				respondMutationError(w, err)
 				return
 			}
-			auditStore.Record(actorName(session), "adjusted stock", "finished-goods:"+item.ID)
 			respondJSON(w, http.StatusOK, item)
 			return
 		}
@@ -286,12 +335,22 @@ func NewHandler(modules *Modules, sessions *auth.SessionStore, auditStore *audit
 				respondError(w, http.StatusBadRequest, err)
 				return
 			}
-			saved, err := modules.Packaging.Upsert(item)
+			var saved packaging.PackagingSpec
+			err := runMutation(r.Context(), transactionScope, func(services TransactionServices) error {
+				if services.Packaging == nil {
+					return errors.New("transaction scope has no packaging service")
+				}
+				var err error
+				saved, err = services.Packaging.Upsert(item)
+				if err != nil {
+					return mutationServiceError(err)
+				}
+				return recordMutationAudit(services, actorName(session), "saved", "packaging:"+saved.ID)
+			})
 			if err != nil {
-				respondServiceError(w, err)
+				respondMutationError(w, err)
 				return
 			}
-			auditStore.Record(actorName(session), "saved", "packaging:"+saved.ID)
 			respondJSON(w, http.StatusCreated, saved)
 			return
 		}
@@ -309,11 +368,19 @@ func NewHandler(modules *Modules, sessions *auth.SessionStore, auditStore *audit
 			return
 		}
 		id := strings.TrimPrefix(r.URL.Path, "/api/packaging/")
-		if err := modules.Packaging.Remove(id); err != nil {
-			respondServiceError(w, err)
+		err := runMutation(r.Context(), transactionScope, func(services TransactionServices) error {
+			if services.Packaging == nil {
+				return errors.New("transaction scope has no packaging service")
+			}
+			if err := services.Packaging.Remove(id); err != nil {
+				return mutationServiceError(err)
+			}
+			return recordMutationAudit(services, actorName(session), "deleted", "packaging:"+id)
+		})
+		if err != nil {
+			respondMutationError(w, err)
 			return
 		}
-		auditStore.Record(actorName(session), "deleted", "packaging:"+id)
 		w.WriteHeader(http.StatusNoContent)
 	})
 	mux.HandleFunc("/api/logistics", func(w http.ResponseWriter, r *http.Request) {
@@ -346,12 +413,22 @@ func NewHandler(modules *Modules, sessions *auth.SessionStore, auditStore *audit
 				respondError(w, http.StatusBadRequest, err)
 				return
 			}
-			saved, err := modules.Logistics.Upsert(item)
+			var saved logistics.StorageSlot
+			err := runMutation(r.Context(), transactionScope, func(services TransactionServices) error {
+				if services.Logistics == nil {
+					return errors.New("transaction scope has no logistics service")
+				}
+				var err error
+				saved, err = services.Logistics.Upsert(item)
+				if err != nil {
+					return mutationServiceError(err)
+				}
+				return recordMutationAudit(services, actorName(session), "saved", "logistics:"+saved.ID)
+			})
 			if err != nil {
-				respondServiceError(w, err)
+				respondMutationError(w, err)
 				return
 			}
-			auditStore.Record(actorName(session), "saved", "logistics:"+saved.ID)
 			respondJSON(w, http.StatusCreated, saved)
 			return
 		}
@@ -369,11 +446,19 @@ func NewHandler(modules *Modules, sessions *auth.SessionStore, auditStore *audit
 			return
 		}
 		id := strings.TrimPrefix(r.URL.Path, "/api/logistics/")
-		if err := modules.Logistics.Remove(id); err != nil {
-			respondServiceError(w, err)
+		err := runMutation(r.Context(), transactionScope, func(services TransactionServices) error {
+			if services.Logistics == nil {
+				return errors.New("transaction scope has no logistics service")
+			}
+			if err := services.Logistics.Remove(id); err != nil {
+				return mutationServiceError(err)
+			}
+			return recordMutationAudit(services, actorName(session), "deleted", "logistics:"+id)
+		})
+		if err != nil {
+			respondMutationError(w, err)
 			return
 		}
-		auditStore.Record(actorName(session), "deleted", "logistics:"+id)
 		w.WriteHeader(http.StatusNoContent)
 	})
 	mux.HandleFunc("/api/invoices", func(w http.ResponseWriter, r *http.Request) {
@@ -406,12 +491,22 @@ func NewHandler(modules *Modules, sessions *auth.SessionStore, auditStore *audit
 				respondError(w, http.StatusBadRequest, err)
 				return
 			}
-			saved, err := modules.Billing.Upsert(item)
+			var saved billing.Invoice
+			err := runMutation(r.Context(), transactionScope, func(services TransactionServices) error {
+				if services.Billing == nil {
+					return errors.New("transaction scope has no billing service")
+				}
+				var err error
+				saved, err = services.Billing.Upsert(item)
+				if err != nil {
+					return mutationServiceError(err)
+				}
+				return recordMutationAudit(services, actorName(session), "saved", "billing:"+saved.ID)
+			})
 			if err != nil {
-				respondServiceError(w, err)
+				respondMutationError(w, err)
 				return
 			}
-			auditStore.Record(actorName(session), "saved", "billing:"+saved.ID)
 			respondJSON(w, http.StatusCreated, saved)
 			return
 		}
@@ -428,12 +523,22 @@ func NewHandler(modules *Modules, sessions *auth.SessionStore, auditStore *audit
 			}
 			id := strings.TrimSuffix(path, "/issue")
 			id = strings.TrimSuffix(id, "/")
-			item, err := modules.Billing.Issue(id)
+			var item billing.Invoice
+			err := runMutation(r.Context(), transactionScope, func(services TransactionServices) error {
+				if services.Billing == nil {
+					return errors.New("transaction scope has no billing service")
+				}
+				var err error
+				item, err = services.Billing.Issue(id)
+				if err != nil {
+					return mutationServiceError(err)
+				}
+				return recordMutationAudit(services, actorName(session), "issued", "billing:"+item.ID)
+			})
 			if err != nil {
-				respondServiceError(w, err)
+				respondMutationError(w, err)
 				return
 			}
-			auditStore.Record(actorName(session), "issued", "billing:"+item.ID)
 			respondJSON(w, http.StatusOK, item)
 			return
 		}
