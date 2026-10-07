@@ -32,12 +32,20 @@ type SessionUser struct {
 	Role     string `json:"role"`
 }
 
+// SessionService provides credential login and token lookup to HTTP handlers.
+type SessionService interface {
+	Login(username, password string) (string, SessionUser, bool)
+	Get(token string) (SessionUser, bool)
+}
+
 type SessionStore struct {
 	path     string
 	users    []UserAccount
 	mu       sync.RWMutex
 	sessions map[string]SessionUser
 }
+
+var _ SessionService = (*SessionStore)(nil)
 
 func NewSessionStore(path string, users []UserAccount) *SessionStore {
 	s := &SessionStore{path: path, users: users, sessions: map[string]SessionUser{}}

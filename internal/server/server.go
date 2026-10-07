@@ -66,11 +66,11 @@ func NewHandler(modules *Modules, sessions *auth.SessionStore, auditStore *audit
 
 // NewHandlerWithTransactionScope constructs a handler whose persisted mutations
 // use the supplied transaction scope. A nil scope fails closed on every mutation.
-func NewHandlerWithTransactionScope(modules *Modules, sessions *auth.SessionStore, auditStore *audit.Store, ui *web.UI, transactionScope TransactionScope) http.Handler {
+func NewHandlerWithTransactionScope(modules *Modules, sessions auth.SessionService, auditStore *audit.Store, ui *web.UI, transactionScope TransactionScope) http.Handler {
 	return newHandler(modules, sessions, auditStore, ui, transactionScope)
 }
 
-func newHandler(modules *Modules, sessions *auth.SessionStore, auditStore *audit.Store, ui *web.UI, transactionScope TransactionScope) http.Handler {
+func newHandler(modules *Modules, sessions auth.SessionService, auditStore *audit.Store, ui *web.UI, transactionScope TransactionScope) http.Handler {
 	obs := observability.New(slog.New(slog.NewJSONHandler(os.Stdout, nil)))
 	mux := http.NewServeMux()
 	mux.Handle("/metrics", obs.MetricsHandler())
@@ -679,7 +679,7 @@ func setSecurityHeaders(w http.ResponseWriter) {
 	headers.Set("Permissions-Policy", "camera=(), microphone=(), geolocation=()")
 }
 
-func currentSession(r *http.Request, sessions *auth.SessionStore) (string, auth.SessionUser, bool) {
+func currentSession(r *http.Request, sessions auth.SessionService) (string, auth.SessionUser, bool) {
 	token := auth.GetBearerToken(r.Header.Get("Authorization"))
 	if user, ok := sessions.Get(token); ok {
 		return token, user, true

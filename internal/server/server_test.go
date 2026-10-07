@@ -477,6 +477,34 @@ func TestHandlerInvoiceAndFoxProRuntimeContract(t *testing.T) {
 	}
 }
 
+func TestHandlerWithTransactionScopeAcceptsSQLiteSessionStore(t *testing.T) {
+	db, err := store.OpenSQLite(filepath.Join(t.TempDir(), "sessions.sqlite"))
+	if err != nil {
+		t.Fatalf("open SQLite database: %v", err)
+	}
+	defer db.Close()
+
+	h := NewHandlerWithTransactionScope(
+		transactionTestModules(),
+		auth.NewSQLiteSessionStore(db, []auth.UserAccount{auth.NewUserAccount("admin", "admin123", "administrador")}),
+		audit.NewStore(filepath.Join(t.TempDir(), "audit.json")),
+		web.NewUI(),
+		newRecordingTransactionScope(),
+	)
+	token := loginAs(t, h, "admin", "admin123")
+	resp := performRequest(t, h, http.MethodGet, "/api/me", nil, token)
+	if resp.Code != http.StatusOK {
+		t.Fatalf("GET /api/me with SQLite session = %d, want 200: %s", resp.Code, resp.Body.String())
+	}
+	var got auth.SessionUser
+	if err := json.Unmarshal(resp.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode /api/me session: %v", err)
+	}
+	if want := (auth.SessionUser{Username: "admin", Role: "administrador"}); got != want {
+		t.Fatalf("GET /api/me session = %+v, want %+v", got, want)
+	}
+}
+
 func TestHandlerAuthStatusDistinction(t *testing.T) {
 	h, _ := httpContractTestHandler(t)
 	for _, test := range []struct {
