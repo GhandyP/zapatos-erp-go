@@ -1,6 +1,7 @@
 package audit
 
 import (
+	"context"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -24,6 +25,29 @@ func TestStorePersistsEventsOnRecord(t *testing.T) {
 	}
 	if events[0] != recorded {
 		t.Fatalf("reloaded event = %+v, want %+v", events[0], recorded)
+	}
+}
+
+func TestStoreContextAccessReportsPersistenceAndCancellationErrors(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "audit.json")
+	if err := os.Mkdir(path, 0o755); err != nil {
+		t.Fatalf("create directory at audit path: %v", err)
+	}
+	store := NewStore(path)
+	if _, err := store.RecordContext(context.Background(), "admin", "saved", "packaging:pkg-1"); err == nil {
+		t.Fatal("RecordContext returned nil, want JSON persistence error")
+	}
+	if events := store.List(); len(events) != 0 {
+		t.Fatalf("events after failed persistence = %#v, want no in-memory change", events)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := store.ListContext(ctx); err == nil {
+		t.Fatal("ListContext returned nil, want context cancellation error")
+	}
+	if _, err := store.RecordContext(ctx, "admin", "saved", "packaging:pkg-1"); err == nil {
+		t.Fatal("RecordContext returned nil, want context cancellation error")
 	}
 }
 

@@ -46,7 +46,17 @@ type Modules struct {
 }
 
 func Run(ctx context.Context, addr string, modules *Modules, sessions *auth.SessionStore, auditStore *audit.Store, ui *web.UI) error {
-	server := newHTTPServer(addr, NewHandler(modules, sessions, auditStore, ui))
+	return runHTTPServer(ctx, addr, NewHandler(modules, sessions, auditStore, ui))
+}
+
+// RunWithTransactionScope serves the injected backend path while preserving the
+// same lifecycle and HTTP server settings as the transitional Run entry point.
+func RunWithTransactionScope(ctx context.Context, addr string, modules *Modules, sessions auth.SessionService, auditStore audit.Access, ui *web.UI, transactionScope TransactionScope) error {
+	return runHTTPServer(ctx, addr, NewHandlerWithTransactionScope(modules, sessions, auditStore, ui, transactionScope))
+}
+
+func runHTTPServer(ctx context.Context, addr string, handler http.Handler) error {
+	server := newHTTPServer(addr, handler)
 
 	go func() {
 		<-ctx.Done()
@@ -66,11 +76,11 @@ func NewHandler(modules *Modules, sessions *auth.SessionStore, auditStore *audit
 
 // NewHandlerWithTransactionScope constructs a handler whose persisted mutations
 // use the supplied transaction scope. A nil scope fails closed on every mutation.
-func NewHandlerWithTransactionScope(modules *Modules, sessions auth.SessionService, auditStore *audit.Store, ui *web.UI, transactionScope TransactionScope) http.Handler {
+func NewHandlerWithTransactionScope(modules *Modules, sessions auth.SessionService, auditStore audit.Access, ui *web.UI, transactionScope TransactionScope) http.Handler {
 	return newHandler(modules, sessions, auditStore, ui, transactionScope)
 }
 
-func newHandler(modules *Modules, sessions auth.SessionService, auditStore *audit.Store, ui *web.UI, transactionScope TransactionScope) http.Handler {
+func newHandler(modules *Modules, sessions auth.SessionService, auditStore audit.Access, ui *web.UI, transactionScope TransactionScope) http.Handler {
 	obs := observability.New(slog.New(slog.NewJSONHandler(os.Stdout, nil)))
 	mux := http.NewServeMux()
 	mux.Handle("/metrics", obs.MetricsHandler())
@@ -591,7 +601,11 @@ func newHandler(modules *Modules, sessions auth.SessionService, auditStore *audi
 			respondError(w, http.StatusInternalServerError, err)
 			return
 		}
-		auditStore.Record(actorName(session), "synced", "foxpro:issued-invoices")
+		// This standalone audit write follows the external sync and is not atomic with it.
+		if _, err := auditStore.RecordContext(r.Context(), actorName(session), "synced", "foxpro:issued-invoices"); err != nil {
+			respondError(w, http.StatusInternalServerError, err)
+			return
+		}
 		respondJSON(w, http.StatusOK, status)
 	})
 	mux.HandleFunc("/api/audit", func(w http.ResponseWriter, r *http.Request) {
@@ -605,7 +619,12 @@ func newHandler(modules *Modules, sessions auth.SessionService, auditStore *audi
 			respondJSON(w, http.StatusForbidden, map[string]any{"error": "forbidden"})
 			return
 		}
-		respondJSON(w, http.StatusOK, filterAuditEvents(auditStore.List(), r))
+		events, err := auditStore.ListContext(r.Context())
+		if err != nil {
+			respondError(w, http.StatusInternalServerError, err)
+			return
+		}
+		respondJSON(w, http.StatusOK, filterAuditEvents(events, r))
 	})
 	mux.HandleFunc("/api/audit/export", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
@@ -618,7 +637,12 @@ func newHandler(modules *Modules, sessions auth.SessionService, auditStore *audi
 			respondJSON(w, http.StatusForbidden, map[string]any{"error": "forbidden"})
 			return
 		}
-		events := filterAuditEvents(auditStore.List(), r)
+		events, err := auditStore.ListContext(r.Context())
+		if err != nil {
+			respondError(w, http.StatusInternalServerError, err)
+			return
+		}
+		events = filterAuditEvents(events, r)
 		w.Header().Set("Content-Type", "text/csv; charset=utf-8")
 		w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=\"audit-%s.csv\"", time.Now().UTC().Format("2006-01-02")))
 		writer := csv.NewWriter(w)

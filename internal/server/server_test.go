@@ -505,6 +505,114 @@ func TestHandlerWithTransactionScopeAcceptsSQLiteSessionStore(t *testing.T) {
 	}
 }
 
+func TestAuditRoutesUseContextAwareSQLiteAccess(t *testing.T) {
+	db, err := store.OpenSQLite(filepath.Join(t.TempDir(), "audit.sqlite"))
+	if err != nil {
+		t.Fatalf("open SQLite database: %v", err)
+	}
+	defer db.Close()
+	auditAccess := audit.NewSQLiteStore(db)
+	if _, err := auditAccess.RecordContext(context.Background(), "admin", "saved", "packaging:pkg-sqlite"); err != nil {
+		t.Fatalf("seed SQLite audit event: %v", err)
+	}
+
+	h := NewHandlerWithTransactionScope(
+		transactionTestModules(),
+		auth.NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"), []auth.UserAccount{auth.NewUserAccount("admin", "admin123", "administrador")}),
+		auditAccess,
+		web.NewUI(),
+		NewSQLiteTransactionScope(db),
+	)
+	token := loginAs(t, h, "admin", "admin123")
+
+	resp := performRequest(t, h, http.MethodGet, "/api/audit", nil, token)
+	if resp.Code != http.StatusOK {
+		t.Fatalf("GET /api/audit = %d, want 200: %s", resp.Code, resp.Body.String())
+	}
+	var events []audit.Event
+	if err := json.Unmarshal(resp.Body.Bytes(), &events); err != nil {
+		t.Fatalf("decode audit events: %v", err)
+	}
+	if len(events) != 1 || events[0].Entity != "packaging:pkg-sqlite" {
+		t.Fatalf("GET /api/audit events = %#v, want seeded SQLite event", events)
+	}
+
+	resp = performRequest(t, h, http.MethodGet, "/api/audit/export", nil, token)
+	if resp.Code != http.StatusOK {
+		t.Fatalf("GET /api/audit/export = %d, want 200: %s", resp.Code, resp.Body.String())
+	}
+	if got := resp.Header().Get("Content-Type"); got != "text/csv; charset=utf-8" {
+		t.Fatalf("audit export Content-Type = %q, want CSV", got)
+	}
+	if !strings.Contains(resp.Body.String(), "at,actor,action,entity,module") || !strings.Contains(resp.Body.String(), "packaging:pkg-sqlite,packaging") {
+		t.Fatalf("audit export does not contain seeded SQLite event: %s", resp.Body.String())
+	}
+}
+
+func TestAuditReadRoutesSurfaceSQLiteErrors(t *testing.T) {
+	db, err := store.OpenSQLite(filepath.Join(t.TempDir(), "audit.sqlite"))
+	if err != nil {
+		t.Fatalf("open SQLite database: %v", err)
+	}
+	h := NewHandlerWithTransactionScope(
+		transactionTestModules(),
+		auth.NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"), []auth.UserAccount{auth.NewUserAccount("admin", "admin123", "administrador")}),
+		audit.NewSQLiteStore(db),
+		web.NewUI(),
+		nil,
+	)
+	token := loginAs(t, h, "admin", "admin123")
+	if err := db.Close(); err != nil {
+		t.Fatalf("close SQLite database: %v", err)
+	}
+
+	for _, path := range []string{"/api/audit", "/api/audit/export"} {
+		t.Run(path, func(t *testing.T) {
+			resp := performRequest(t, h, http.MethodGet, path, nil, token)
+			if resp.Code != http.StatusInternalServerError {
+				t.Fatalf("GET %s = %d, want 500: %s", path, resp.Code, resp.Body.String())
+			}
+			if !strings.Contains(resp.Body.String(), "internal server error") {
+				t.Fatalf("GET %s error response = %s, want generic internal error", path, resp.Body.String())
+			}
+		})
+	}
+}
+
+func TestFoxProSyncRecordsThroughStandaloneSQLiteAuditAccess(t *testing.T) {
+	db, err := store.OpenSQLite(filepath.Join(t.TempDir(), "audit.sqlite"))
+	if err != nil {
+		t.Fatalf("open SQLite database: %v", err)
+	}
+	defer db.Close()
+
+	invoices := billing.New(store.NewMemoryRepository([]billing.Invoice{
+		{ID: "inv-issued", CustomerID: "customer-1", Total: 100, Tax: 21, Status: billing.StatusIssued},
+	}, func(item billing.Invoice) string { return item.ID }))
+	modules := transactionTestModules()
+	modules.Billing = invoices
+	modules.Foxpro = foxpro.New(invoices)
+	h := NewHandlerWithTransactionScope(
+		modules,
+		auth.NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"), []auth.UserAccount{auth.NewUserAccount("admin", "admin123", "administrador")}),
+		audit.NewSQLiteStore(db),
+		web.NewUI(),
+		NewSQLiteTransactionScope(db),
+	)
+	token := loginAs(t, h, "admin", "admin123")
+	resp := performRequest(t, h, http.MethodPost, "/api/foxpro/sync", nil, token)
+	if resp.Code != http.StatusOK {
+		t.Fatalf("POST /api/foxpro/sync = %d, want 200: %s", resp.Code, resp.Body.String())
+	}
+	events, err := audit.NewSQLiteStore(db).ListContext(context.Background())
+	if err != nil {
+		t.Fatalf("list SQLite audit events: %v", err)
+	}
+	if len(events) != 1 || events[0].Actor != "admin" || events[0].Action != "synced" || events[0].Entity != "foxpro:issued-invoices" {
+		t.Fatalf("FoxPro sync audit events = %#v, want standalone sync event", events)
+	}
+}
+
 func TestHandlerAuthStatusDistinction(t *testing.T) {
 	h, _ := httpContractTestHandler(t)
 	for _, test := range []struct {

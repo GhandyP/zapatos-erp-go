@@ -1,7 +1,9 @@
 package audit
 
 import (
+	"crypto/rand"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -46,6 +48,31 @@ func (w *SQLiteWriter) Write(id string, event Event) error {
 		return fmt.Errorf("retain SQLite audit events: %w", err)
 	}
 	return nil
+}
+
+// Record creates a timestamped event with a collision-resistant ID and inserts
+// it without upsert using the writer's transaction.
+func (w *SQLiteWriter) Record(actor, action, entity string) (Event, error) {
+	id, err := generateSQLiteAuditID()
+	if err != nil {
+		return Event{}, fmt.Errorf("generate SQLite audit ID: %w", err)
+	}
+	event := Event{
+		Actor: actor, Action: action, Entity: entity,
+		At: time.Now().UTC().Format(time.RFC3339Nano),
+	}
+	if err := w.Write(id, event); err != nil {
+		return Event{}, err
+	}
+	return event, nil
+}
+
+func generateSQLiteAuditID() (string, error) {
+	var idBytes [16]byte
+	if _, err := rand.Read(idBytes[:]); err != nil {
+		return "", err
+	}
+	return "aud_" + hex.EncodeToString(idBytes[:]), nil
 }
 
 type sqliteAuditRecord struct {
