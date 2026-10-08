@@ -3,7 +3,6 @@ package manufacturing
 import (
 	"errors"
 	"fmt"
-	"math"
 	"strings"
 	"time"
 
@@ -23,44 +22,44 @@ const (
 )
 
 type BOM struct {
-	ID              string  `json:"id"`
-	Revision        int     `json:"revision"`
-	VariantID       string  `json:"variantId"`
-	MaterialID      string  `json:"materialId"`
-	QuantityPerUnit float64 `json:"quantityPerUnit"`
-	Unit            string  `json:"unit"`
-	CreatedBy       string  `json:"createdBy"`
-	CreatedAt       string  `json:"createdAt"`
+	ID              string `json:"id"`
+	Revision        int    `json:"revision"`
+	VariantID       string `json:"variantId"`
+	MaterialID      string `json:"materialId"`
+	QuantityPerUnit int    `json:"quantityPerUnit"`
+	Unit            string `json:"unit"`
+	CreatedBy       string `json:"createdBy"`
+	CreatedAt       string `json:"createdAt"`
 }
 
 type WorkOrder struct {
-	ID              string  `json:"id"`
-	BOMID           string  `json:"bomId"`
-	BOMRevision     int     `json:"bomRevision"`
-	VariantID       string  `json:"variantId"`
-	MaterialID      string  `json:"materialId"`
-	QuantityPerUnit float64 `json:"quantityPerUnit"`
-	Unit            string  `json:"unit"`
-	PlannedQty      int     `json:"plannedQty"`
-	GoodQty         int     `json:"goodQty"`
-	Status          string  `json:"status"`
-	CreatedBy       string  `json:"createdBy"`
-	CreatedAt       string  `json:"createdAt"`
-	ReleasedBy      string  `json:"releasedBy,omitempty"`
-	ReleasedAt      string  `json:"releasedAt,omitempty"`
-	CompletedBy     string  `json:"completedBy,omitempty"`
-	CompletedAt     string  `json:"completedAt,omitempty"`
+	ID              string `json:"id"`
+	BOMID           string `json:"bomId"`
+	BOMRevision     int    `json:"bomRevision"`
+	VariantID       string `json:"variantId"`
+	MaterialID      string `json:"materialId"`
+	QuantityPerUnit int    `json:"quantityPerUnit"`
+	Unit            string `json:"unit"`
+	PlannedQty      int    `json:"plannedQty"`
+	GoodQty         int    `json:"goodQty"`
+	Status          string `json:"status"`
+	CreatedBy       string `json:"createdBy"`
+	CreatedAt       string `json:"createdAt"`
+	ReleasedBy      string `json:"releasedBy,omitempty"`
+	ReleasedAt      string `json:"releasedAt,omitempty"`
+	CompletedBy     string `json:"completedBy,omitempty"`
+	CompletedAt     string `json:"completedAt,omitempty"`
 }
 
 type MaterialMovement struct {
-	ID          string  `json:"id"`
-	MaterialID  string  `json:"materialId"`
-	Unit        string  `json:"unit"`
-	Quantity    float64 `json:"quantity"`
-	Kind        string  `json:"kind"`
-	WorkOrderID string  `json:"workOrderId,omitempty"`
-	Actor       string  `json:"actor"`
-	At          string  `json:"at"`
+	ID          string `json:"id"`
+	MaterialID  string `json:"materialId"`
+	Unit        string `json:"unit"`
+	Quantity    int    `json:"quantity"`
+	Kind        string `json:"kind"`
+	WorkOrderID string `json:"workOrderId,omitempty"`
+	Actor       string `json:"actor"`
+	At          string `json:"at"`
 }
 
 type Service struct {
@@ -89,8 +88,8 @@ func (s *Service) SaveBOM(bom BOM, actor string) (BOM, error) {
 	if bom.ID == "" || bom.VariantID == "" || bom.MaterialID == "" || bom.Revision < 1 {
 		return BOM{}, domain.ValidationError{Message: "BOM requires id, positive revision, variant and material"}
 	}
-	if !positiveFinite(bom.QuantityPerUnit) {
-		return BOM{}, domain.ValidationError{Message: "BOM quantityPerUnit must be positive and finite"}
+	if bom.QuantityPerUnit <= 0 {
+		return BOM{}, domain.ValidationError{Message: "BOM quantityPerUnit must be positive"}
 	}
 	if actor == "" {
 		return BOM{}, domain.ValidationError{Message: "BOM actor is required"}
@@ -141,14 +140,14 @@ func (s *Service) ListBOMs() ([]BOM, error) {
 
 // OpenStock records the sole opening baseline for a material. Subsequent stock
 // is derived from this movement and order-linked consumption movements.
-func (s *Service) OpenStock(materialID, unit string, quantity float64, actor string) (MaterialMovement, error) {
+func (s *Service) OpenStock(materialID, unit string, quantity int, actor string) (MaterialMovement, error) {
 	if err := s.validateDependencies(); err != nil {
 		return MaterialMovement{}, err
 	}
 	materialID = strings.TrimSpace(materialID)
 	actor = strings.TrimSpace(actor)
-	if materialID == "" || actor == "" || !positiveFinite(quantity) {
-		return MaterialMovement{}, domain.ValidationError{Message: "opening stock requires material, actor and positive finite quantity"}
+	if materialID == "" || actor == "" || quantity <= 0 {
+		return MaterialMovement{}, domain.ValidationError{Message: "opening stock requires material, actor and positive quantity"}
 	}
 	material, err := s.rawMaterials.Get(materialID)
 	if err != nil {
@@ -186,7 +185,7 @@ func (s *Service) ListMaterialMovements() ([]MaterialMovement, error) {
 	return s.movements.List()
 }
 
-func (s *Service) MaterialOnHand(materialID string) (float64, error) {
+func (s *Service) MaterialOnHand(materialID string) (int, error) {
 	if err := s.validateDependencies(); err != nil {
 		return 0, err
 	}
@@ -202,30 +201,34 @@ func (s *Service) MaterialOnHand(materialID string) (float64, error) {
 	if err != nil {
 		return 0, err
 	}
-	var onHand float64
+	var opened, consumed int
+	maxInt := int(^uint(0) >> 1)
 	for _, movement := range movements {
 		if movement.MaterialID != materialID {
 			continue
 		}
-		if !matchingUnit(movement.Unit, material.Unit) || !positiveFinite(movement.Quantity) {
+		if !matchingUnit(movement.Unit, material.Unit) || movement.Quantity <= 0 {
 			return 0, domain.ValidationError{Message: "material movement has invalid unit or quantity"}
 		}
 		switch movement.Kind {
 		case MovementOpeningStock:
-			onHand += movement.Quantity
+			if opened > maxInt-movement.Quantity {
+				return 0, domain.ValidationError{Message: "material opening quantity overflows integer range"}
+			}
+			opened += movement.Quantity
 		case MovementConsumption:
-			onHand -= movement.Quantity
+			if consumed > maxInt-movement.Quantity {
+				return 0, domain.ValidationError{Message: "material consumption quantity overflows integer range"}
+			}
+			consumed += movement.Quantity
 		default:
 			return 0, domain.ValidationError{Message: "material movement has invalid kind"}
 		}
-		if math.IsInf(onHand, 0) || math.IsNaN(onHand) {
-			return 0, domain.ValidationError{Message: "material on-hand quantity is not finite"}
-		}
 	}
-	if onHand < 0 {
+	if consumed > opened {
 		return 0, domain.ValidationError{Message: "material on-hand quantity cannot be negative"}
 	}
-	return onHand, nil
+	return opened - consumed, nil
 }
 
 func (s *Service) CreateWorkOrder(id, bomID string, plannedQty int, actor string) (WorkOrder, error) {
@@ -254,7 +257,7 @@ func (s *Service) CreateWorkOrder(id, bomID string, plannedQty int, actor string
 	if err != nil {
 		return WorkOrder{}, err
 	}
-	if !matchingUnit(bom.Unit, material.Unit) || !positiveFinite(bom.QuantityPerUnit) {
+	if !matchingUnit(bom.Unit, material.Unit) || bom.QuantityPerUnit <= 0 {
 		return WorkOrder{}, domain.ValidationError{Message: "work order BOM is no longer valid for material metadata"}
 	}
 	order := WorkOrder{
@@ -329,22 +332,23 @@ func (s *Service) CompleteWorkOrder(id string, goodQty int, actor string) (WorkO
 	if err != nil {
 		return WorkOrder{}, err
 	}
-	if !matchingUnit(order.Unit, material.Unit) || !positiveFinite(order.QuantityPerUnit) {
+	if !matchingUnit(order.Unit, material.Unit) || order.QuantityPerUnit <= 0 {
 		return WorkOrder{}, domain.ValidationError{Message: "work order material unit or BOM quantity is invalid"}
 	}
 	if _, err := s.finishedGoods.Get(order.VariantID); err != nil {
 		return WorkOrder{}, err
 	}
-	required := float64(order.PlannedQty) * order.QuantityPerUnit
-	if !positiveFinite(required) {
-		return WorkOrder{}, domain.ValidationError{Message: "planned material consumption must be positive and finite"}
+	maxInt := int(^uint(0) >> 1)
+	if order.PlannedQty > maxInt/order.QuantityPerUnit {
+		return WorkOrder{}, domain.ValidationError{Message: "planned material consumption overflows integer range"}
 	}
+	required := order.PlannedQty * order.QuantityPerUnit
 	onHand, err := s.MaterialOnHand(order.MaterialID)
 	if err != nil {
 		return WorkOrder{}, err
 	}
 	if onHand < required {
-		return WorkOrder{}, domain.ValidationError{Message: fmt.Sprintf("insufficient material stock: need %g %s, have %g", required, order.Unit, onHand)}
+		return WorkOrder{}, domain.ValidationError{Message: fmt.Sprintf("insufficient material stock: need %d %s, have %d", required, order.Unit, onHand)}
 	}
 	if _, exists, err := s.movements.FindByID("consumption:" + order.ID); err != nil {
 		return WorkOrder{}, err
@@ -355,7 +359,6 @@ func (s *Service) CompleteWorkOrder(id string, goodQty int, actor string) (WorkO
 	if err != nil {
 		return WorkOrder{}, err
 	}
-	maxInt := int(^uint(0) >> 1)
 	if variant.Stock > maxInt-goodQty {
 		return WorkOrder{}, domain.ValidationError{Message: "finished stock would overflow"}
 	}
@@ -386,10 +389,6 @@ func (s *Service) validateDependencies() error {
 
 func matchingUnit(value, expected string) bool {
 	return strings.TrimSpace(value) != "" && strings.TrimSpace(value) == strings.TrimSpace(expected)
-}
-
-func positiveFinite(value float64) bool {
-	return value > 0 && !math.IsInf(value, 0) && !math.IsNaN(value)
 }
 
 func timestamp() string { return time.Now().UTC().Format(time.RFC3339Nano) }

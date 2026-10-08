@@ -1,7 +1,9 @@
 package manufacturing
 
 import (
+	"encoding/json"
 	"reflect"
+	"strings"
 	"testing"
 
 	"zapatos-erp-go/internal/domain"
@@ -9,6 +11,59 @@ import (
 	"zapatos-erp-go/internal/modules/rawmaterials"
 	"zapatos-erp-go/internal/store"
 )
+
+func TestBOMRejectsFractionalQuantityPerUnitJSON(t *testing.T) {
+	var bom BOM
+	if err := json.Unmarshal([]byte(`{"quantityPerUnit":1.5}`), &bom); err == nil {
+		t.Fatal("fractional quantityPerUnit decoded successfully, want integer-domain rejection")
+	}
+}
+
+func TestMaterialMovementRejectsFractionalQuantityJSON(t *testing.T) {
+	var movement MaterialMovement
+	if err := json.Unmarshal([]byte(`{"quantity":1.5}`), &movement); err == nil {
+		t.Fatal("fractional quantity decoded successfully, want integer-domain rejection")
+	}
+}
+
+func TestCompleteWorkOrderRejectsConsumptionOverflowWithoutChangingState(t *testing.T) {
+	maxInt := int(^uint(0) >> 1)
+	service, _, finished := newManufacturingFixture(t, 0)
+	if _, err := service.SaveBOM(BOM{ID: "bom-1", Revision: 1, VariantID: "variant-1", MaterialID: "leather", QuantityPerUnit: 2, Unit: "m2"}, "admin"); err != nil {
+		t.Fatalf("save BOM: %v", err)
+	}
+	if _, err := service.OpenStock("leather", "m2", maxInt, "admin"); err != nil {
+		t.Fatalf("open material stock: %v", err)
+	}
+	if _, err := service.CreateWorkOrder("wo-1", "bom-1", maxInt, "planner"); err != nil {
+		t.Fatalf("create work order: %v", err)
+	}
+	if _, err := service.ReleaseWorkOrder("wo-1", "supervisor"); err != nil {
+		t.Fatalf("release work order: %v", err)
+	}
+
+	before := snapshotManufacturingState(t, service, finished)
+	if _, err := service.CompleteWorkOrder("wo-1", 1, "operator"); err == nil || !strings.Contains(err.Error(), "overflow") {
+		t.Fatalf("completion error = %v, want integer consumption overflow", err)
+	}
+	after := snapshotManufacturingState(t, service, finished)
+	if !reflect.DeepEqual(after, before) {
+		t.Fatalf("state changed after overflow rejection:\nbefore: %+v\nafter:  %+v", before, after)
+	}
+}
+
+func TestMaterialOnHandRejectsOverflowingStoredMovements(t *testing.T) {
+	maxInt := int(^uint(0) >> 1)
+	service, _, _ := newManufacturingFixture(t, 0)
+	service.movements = store.NewMemoryRepository([]MaterialMovement{
+		{ID: "opening-1", MaterialID: "leather", Unit: "m2", Quantity: maxInt, Kind: MovementOpeningStock},
+		{ID: "opening-2", MaterialID: "leather", Unit: "m2", Quantity: 1, Kind: MovementOpeningStock},
+	}, func(item MaterialMovement) string { return item.ID })
+
+	if _, err := service.MaterialOnHand("leather"); err == nil || !strings.Contains(err.Error(), "overflow") {
+		t.Fatalf("MaterialOnHand error = %v, want movement accumulation overflow", err)
+	}
+}
 
 func TestWorkOrderCompletionConsumesPlannedMaterialAndAddsGoodStock(t *testing.T) {
 	service, raw, finished := newManufacturingFixture(t, 4)
@@ -208,7 +263,7 @@ type manufacturingState struct {
 	BOMs      []BOM
 	Orders    []WorkOrder
 	Movements []MaterialMovement
-	OnHand    float64
+	OnHand    int
 	Stock     int
 }
 
@@ -254,7 +309,7 @@ func newManufacturingFixture(t *testing.T, initialStock int) (*Service, *rawmate
 	), raw, finished
 }
 
-func seedBOMAndStock(service *Service, opening float64) error {
+func seedBOMAndStock(service *Service, opening int) error {
 	if _, err := service.SaveBOM(BOM{ID: "bom-1", Revision: 1, VariantID: "variant-1", MaterialID: "leather", QuantityPerUnit: 2, Unit: "m2"}, "admin"); err != nil {
 		return err
 	}
@@ -262,7 +317,7 @@ func seedBOMAndStock(service *Service, opening float64) error {
 	return err
 }
 
-func seedReleasedWorkOrder(service *Service, opening float64) error {
+func seedReleasedWorkOrder(service *Service, opening int) error {
 	if err := seedBOMAndStock(service, opening); err != nil {
 		return err
 	}
