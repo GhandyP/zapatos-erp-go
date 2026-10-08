@@ -2,28 +2,21 @@ package app
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/signal"
-	"path/filepath"
 	"strings"
 	"syscall"
 
-	"zapatos-erp-go/internal/audit"
-	"zapatos-erp-go/internal/auth"
 	"zapatos-erp-go/internal/domain"
-	"zapatos-erp-go/internal/integrations/foxpro"
-	"zapatos-erp-go/internal/modules/billing"
-	"zapatos-erp-go/internal/modules/finishedgoods"
 	"zapatos-erp-go/internal/modules/logistics"
 	"zapatos-erp-go/internal/modules/packaging"
-	"zapatos-erp-go/internal/modules/rawmaterials"
 	"zapatos-erp-go/internal/server"
-	"zapatos-erp-go/internal/store"
 	"zapatos-erp-go/internal/web"
 )
 
-func Run() error {
+func Run() (runErr error) {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
@@ -35,11 +28,17 @@ func Run() error {
 	if err := validateStartupInputs(cfg); err != nil {
 		return err
 	}
-	modules := buildModules(cfg.DataDir)
-	sessions := auth.NewSessionStore(filepath.Join(cfg.DataDir, "sessions.json"), cfg.SessionUsers())
-	auditStore := audit.NewStore(filepath.Join(cfg.DataDir, "audit.json"))
-	ui := web.NewUI()
-	return server.Run(ctx, cfg.BindAddr, modules, sessions, auditStore, ui)
+	runtime, err := buildSQLiteRuntime(ctx, cfg.DataDir, cfg.SessionUsers())
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if err := runtime.Close(); err != nil {
+			runErr = errors.Join(runErr, fmt.Errorf("close SQLite runtime: %w", err))
+		}
+	}()
+
+	return server.RunWithTransactionScope(ctx, cfg.BindAddr, runtime.modules, runtime.sessions, runtime.auditStore, web.NewUI(), runtime.transactionScope)
 }
 
 func validateStartupInputs(cfg BootstrapConfig) error {
@@ -49,36 +48,14 @@ func validateStartupInputs(cfg BootstrapConfig) error {
 	if strings.TrimSpace(cfg.DataDir) == "" {
 		return fmt.Errorf("data directory is required")
 	}
-	if err := os.MkdirAll(cfg.DataDir, 0o755); err != nil {
-		return fmt.Errorf("prepare data directory: %w", err)
+	info, err := os.Stat(cfg.DataDir)
+	if err == nil && !info.IsDir() {
+		return fmt.Errorf("data directory %q is not a directory", cfg.DataDir)
 	}
-	probe, err := os.CreateTemp(cfg.DataDir, ".writable-*")
-	if err != nil {
-		return fmt.Errorf("data directory is not writable: %w", err)
-	}
-	name := probe.Name()
-	if err := probe.Close(); err != nil {
-		return fmt.Errorf("close data directory probe: %w", err)
-	}
-	if err := os.Remove(name); err != nil {
-		return fmt.Errorf("cleanup data directory probe: %w", err)
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("inspect data directory: %w", err)
 	}
 	return nil
-}
-
-func buildModules(dataDir string) *server.Modules {
-	rawRepo := store.NewJSONFileRepository(filepath.Join(dataDir, "raw-materials.json"), []rawmaterials.RawMaterial{}, func(v rawmaterials.RawMaterial) string { return v.ID })
-	finishedRepo := store.NewJSONFileRepository(filepath.Join(dataDir, "finished-goods.json"), []finishedgoods.FinishedProductVariant{}, func(v finishedgoods.FinishedProductVariant) string { return v.ID })
-	packagingRepo := store.NewJSONFileRepository(filepath.Join(dataDir, "packaging.json"), defaultPackagingSeeds(), func(v packaging.PackagingSpec) string { return v.ID })
-	logisticsRepo := store.NewJSONFileRepository(filepath.Join(dataDir, "logistics.json"), defaultLogisticsSeeds(), func(v logistics.StorageSlot) string { return v.ID })
-	billingRepo := store.NewJSONFileRepository(filepath.Join(dataDir, "invoices.json"), []billing.Invoice{}, func(v billing.Invoice) string { return v.ID })
-	rawSvc := rawmaterials.New(rawRepo)
-	finishedSvc := finishedgoods.New(finishedRepo)
-	packagingSvc := packaging.New(packagingRepo)
-	logisticsSvc := logistics.New(logisticsRepo)
-	billingSvc := billing.New(billingRepo)
-	foxproAdapter := foxpro.New(billingSvc)
-	return &server.Modules{RawMaterials: rawSvc, FinishedGoods: finishedSvc, Packaging: packagingSvc, Logistics: logisticsSvc, Billing: billingSvc, Foxpro: foxproAdapter}
 }
 
 func defaultPackagingSeeds() []packaging.PackagingSpec {

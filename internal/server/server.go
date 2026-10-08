@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	"zapatos-erp-go/internal/audit"
@@ -55,18 +56,83 @@ func RunWithTransactionScope(ctx context.Context, addr string, modules *Modules,
 	return runHTTPServer(ctx, addr, NewHandlerWithTransactionScope(modules, sessions, auditStore, ui, transactionScope))
 }
 
+type activeHandlerTracker struct {
+	handler  http.Handler
+	mu       sync.Mutex
+	cond     *sync.Cond
+	active   int
+	stopping bool
+}
+
+func newActiveHandlerTracker(handler http.Handler) *activeHandlerTracker {
+	tracker := &activeHandlerTracker{handler: handler}
+	tracker.cond = sync.NewCond(&tracker.mu)
+	return tracker
+}
+
+func (tracker *activeHandlerTracker) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	tracker.mu.Lock()
+	if tracker.stopping {
+		tracker.mu.Unlock()
+		http.Error(w, "server is shutting down", http.StatusServiceUnavailable)
+		return
+	}
+	tracker.active++
+	tracker.mu.Unlock()
+
+	defer func() {
+		tracker.mu.Lock()
+		tracker.active--
+		if tracker.active == 0 {
+			tracker.cond.Broadcast()
+		}
+		tracker.mu.Unlock()
+	}()
+	tracker.handler.ServeHTTP(w, r)
+}
+
+func (tracker *activeHandlerTracker) stopAccepting() {
+	tracker.mu.Lock()
+	tracker.stopping = true
+	tracker.mu.Unlock()
+}
+
+func (tracker *activeHandlerTracker) wait() {
+	tracker.mu.Lock()
+	for tracker.active != 0 {
+		tracker.cond.Wait()
+	}
+	tracker.mu.Unlock()
+}
+
 func runHTTPServer(ctx context.Context, addr string, handler http.Handler) error {
-	server := newHTTPServer(addr, handler)
+	tracker := newActiveHandlerTracker(handler)
+	server := newHTTPServer(addr, tracker)
+	serveDone := make(chan struct{})
+	shutdownDone := make(chan struct{})
 
 	go func() {
-		<-ctx.Done()
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
-		defer cancel()
-		server.Shutdown(shutdownCtx)
+		defer close(shutdownDone)
+		select {
+		case <-ctx.Done():
+			tracker.stopAccepting()
+			shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
+			defer cancel()
+			if err := server.Shutdown(shutdownCtx); err != nil {
+				_ = server.Close()
+			}
+		case <-serveDone:
+			tracker.stopAccepting()
+			_ = server.Close()
+		}
 	}()
 
 	fmt.Printf("Zapatos ERP HTTP server running on http://localhost%s\n", addr)
-	return server.ListenAndServe()
+	listenErr := server.ListenAndServe()
+	close(serveDone)
+	<-shutdownDone
+	tracker.wait()
+	return listenErr
 }
 
 func NewHandler(modules *Modules, sessions *auth.SessionStore, auditStore *audit.Store, ui *web.UI) http.Handler {

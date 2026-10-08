@@ -6,13 +6,16 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"zapatos-erp-go/internal/audit"
 	"zapatos-erp-go/internal/auth"
@@ -1069,4 +1072,81 @@ func performTransactionRequest(t *testing.T, h http.Handler, method, path string
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
 	return rec
+}
+
+func TestRunHTTPServerWaitsForActiveHandlersBeforeReturning(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("reserve HTTP address: %v", err)
+	}
+	addr := listener.Addr().String()
+	if err := listener.Close(); err != nil {
+		t.Fatalf("release reserved HTTP address: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	handlerEntered := make(chan struct{})
+	releaseHandler := make(chan struct{})
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(releaseHandler) }) }
+	defer release()
+
+	serverDone := make(chan error, 1)
+	go func() {
+		serverDone <- runHTTPServer(ctx, addr, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			close(handlerEntered)
+			<-releaseHandler
+			w.WriteHeader(http.StatusOK)
+		}))
+	}()
+
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		connection, dialErr := net.DialTimeout("tcp", addr, 50*time.Millisecond)
+		if dialErr == nil {
+			_ = connection.Close()
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	requestDone := make(chan error, 1)
+	go func() {
+		response, requestErr := http.Get("http://" + addr + "/")
+		if requestErr == nil {
+			requestErr = response.Body.Close()
+		}
+		requestDone <- requestErr
+	}()
+	select {
+	case <-handlerEntered:
+	case <-time.After(3 * time.Second):
+		t.Fatal("HTTP handler did not start")
+	}
+
+	cancel()
+	select {
+	case err := <-serverDone:
+		t.Fatalf("server returned before the active handler drained: %v", err)
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	release()
+	select {
+	case err := <-serverDone:
+		if !errors.Is(err, http.ErrServerClosed) {
+			t.Fatalf("runHTTPServer error = %v, want http.ErrServerClosed", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("server did not return after the active handler drained")
+	}
+	select {
+	case err := <-requestDone:
+		if err != nil {
+			t.Fatalf("HTTP request failed: %v", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("HTTP request did not finish")
+	}
 }
