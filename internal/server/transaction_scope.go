@@ -10,6 +10,7 @@ import (
 	"zapatos-erp-go/internal/modules/billing"
 	"zapatos-erp-go/internal/modules/finishedgoods"
 	"zapatos-erp-go/internal/modules/logistics"
+	"zapatos-erp-go/internal/modules/manufacturing"
 	"zapatos-erp-go/internal/modules/packaging"
 	"zapatos-erp-go/internal/modules/rawmaterials"
 )
@@ -23,6 +24,7 @@ type TransactionServices struct {
 	Packaging     *packaging.Service
 	Logistics     *logistics.Service
 	Billing       *billing.Service
+	Manufacturing *manufacturing.Service
 	RecordAudit   func(actor, action, entity string) error
 }
 

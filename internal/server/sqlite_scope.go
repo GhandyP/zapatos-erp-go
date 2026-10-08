@@ -9,6 +9,7 @@ import (
 	"zapatos-erp-go/internal/modules/billing"
 	"zapatos-erp-go/internal/modules/finishedgoods"
 	"zapatos-erp-go/internal/modules/logistics"
+	"zapatos-erp-go/internal/modules/manufacturing"
 	"zapatos-erp-go/internal/modules/packaging"
 	"zapatos-erp-go/internal/modules/rawmaterials"
 	"zapatos-erp-go/internal/store"
@@ -33,11 +34,20 @@ func (scope *sqliteTransactionScope) Run(ctx context.Context, operation func(Tra
 	}
 
 	return scope.unitOfWork.Run(ctx, func(tx *sql.Tx) error {
+		rawMaterialService := rawmaterials.New(store.NewSQLiteRepository(tx, store.CollectionRawMaterials,
+			func(item rawmaterials.RawMaterial) string { return item.ID }))
+		finishedGoodsService := finishedgoods.New(store.NewSQLiteRepository(tx, store.CollectionFinishedGoods,
+			func(item finishedgoods.FinishedProductVariant) string { return item.ID }))
 		services := TransactionServices{
-			RawMaterials: rawmaterials.New(store.NewSQLiteRepository(tx, store.CollectionRawMaterials,
-				func(item rawmaterials.RawMaterial) string { return item.ID })),
-			FinishedGoods: finishedgoods.New(store.NewSQLiteRepository(tx, store.CollectionFinishedGoods,
-				func(item finishedgoods.FinishedProductVariant) string { return item.ID })),
+			RawMaterials:  rawMaterialService,
+			FinishedGoods: finishedGoodsService,
+			Manufacturing: manufacturing.New(
+				store.NewSQLiteRepository(tx, store.CollectionManufacturingBOMs, func(item manufacturing.BOM) string { return item.ID }),
+				store.NewSQLiteRepository(tx, store.CollectionManufacturingWorkOrders, func(item manufacturing.WorkOrder) string { return item.ID }),
+				store.NewSQLiteRepository(tx, store.CollectionMaterialMovements, func(item manufacturing.MaterialMovement) string { return item.ID }),
+				rawMaterialService,
+				finishedGoodsService,
+			),
 			Packaging: packaging.New(store.NewSQLiteRepository(tx, store.CollectionPackaging,
 				func(item packaging.PackagingSpec) string { return item.ID })),
 			Logistics: logistics.New(store.NewSQLiteRepository(tx, store.CollectionLogistics,
