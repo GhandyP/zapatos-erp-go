@@ -11,7 +11,10 @@ import (
 
 	"zapatos-erp-go/internal/auth"
 	"zapatos-erp-go/internal/domain"
+	"zapatos-erp-go/internal/modules/finishedgoods"
+	"zapatos-erp-go/internal/modules/manufacturing"
 	"zapatos-erp-go/internal/modules/packaging"
+	"zapatos-erp-go/internal/modules/rawmaterials"
 	"zapatos-erp-go/internal/server"
 	"zapatos-erp-go/internal/store"
 )
@@ -130,6 +133,51 @@ func TestSQLiteRuntimeTransactionScopeCommitsMutationAndAudit(t *testing.T) {
 	}
 	if len(events) != 1 || events[0].Entity != item.ID {
 		t.Fatalf("committed audit events = %#v, want package audit event", events)
+	}
+}
+
+func TestSQLiteRuntimeManufacturingReadModuleUsesPersistedRepositories(t *testing.T) {
+	runtime := buildRuntime(t, filepath.Join(t.TempDir(), "data"), nil)
+	if runtime.modules.Manufacturing == nil {
+		t.Fatal("SQLite runtime manufacturing read service is nil")
+	}
+
+	err := runtime.transactionScope.Run(context.Background(), func(services server.TransactionServices) error {
+		if _, err := services.RawMaterials.Upsert(rawmaterials.RawMaterial{
+			ID: "material-1", Name: "Leather", Unit: "m2", Dimensions: dimensionsForRuntimeTest(),
+		}); err != nil {
+			return err
+		}
+		if _, err := services.FinishedGoods.Upsert(finishedgoods.FinishedProductVariant{
+			ID: "variant-1", Style: "Oxford", Size: "40", Color: "Black", Dimensions: dimensionsForRuntimeTest(),
+		}); err != nil {
+			return err
+		}
+		if _, err := services.Manufacturing.SaveBOM(manufacturing.BOM{
+			ID: "bom-1", Revision: 1, VariantID: "variant-1", MaterialID: "material-1", QuantityPerUnit: 2, Unit: "m2",
+		}, "operator"); err != nil {
+			return err
+		}
+		if _, err := services.Manufacturing.OpenStock("material-1", "m2", 10, "operator"); err != nil {
+			return err
+		}
+		_, err := services.Manufacturing.CreateWorkOrder("wo-1", "bom-1", 3, "operator")
+		return err
+	})
+	if err != nil {
+		t.Fatalf("persist manufacturing records in SQLite transaction: %v", err)
+	}
+
+	boms, err := runtime.modules.Manufacturing.ListBOMs()
+	if err != nil || len(boms) != 1 || boms[0].ID != "bom-1" {
+		t.Fatalf("SQLite manufacturing BOM read = %#v, err %v; want bom-1", boms, err)
+	}
+	orders, err := runtime.modules.Manufacturing.ListWorkOrders()
+	if err != nil || len(orders) != 1 || orders[0].ID != "wo-1" {
+		t.Fatalf("SQLite manufacturing work-order read = %#v, err %v; want wo-1", orders, err)
+	}
+	if onHand, err := runtime.modules.Manufacturing.MaterialOnHand("material-1"); err != nil || onHand != 10 {
+		t.Fatalf("SQLite manufacturing material on hand = %d, err %v; want 10", onHand, err)
 	}
 }
 

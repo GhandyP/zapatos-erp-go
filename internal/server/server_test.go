@@ -23,6 +23,7 @@ import (
 	"zapatos-erp-go/internal/modules/billing"
 	"zapatos-erp-go/internal/modules/finishedgoods"
 	"zapatos-erp-go/internal/modules/logistics"
+	"zapatos-erp-go/internal/modules/manufacturing"
 	"zapatos-erp-go/internal/modules/packaging"
 	"zapatos-erp-go/internal/modules/rawmaterials"
 	"zapatos-erp-go/internal/store"
@@ -1069,6 +1070,528 @@ func performTransactionRequest(t *testing.T, h http.Handler, method, path string
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	return rec
+}
+
+func TestManufacturingHTTPAdminOpeningStockAuditsAuthenticatedActor(t *testing.T) {
+	h, scope, service, _ := manufacturingHTTPTestHandler(t)
+	adminToken := loginAs(t, h, "admin", "admin123")
+
+	resp := performRequest(t, h, http.MethodPost, "/api/manufacturing/material-stock/openings", map[string]any{
+		"materialId": "material-1", "unit": "m2", "quantity": 10, "actor": "forged",
+	}, adminToken)
+	if resp.Code != http.StatusCreated {
+		t.Fatalf("opening stock status = %d, want 201: %s", resp.Code, resp.Body.String())
+	}
+	var movement manufacturing.MaterialMovement
+	if err := json.Unmarshal(resp.Body.Bytes(), &movement); err != nil {
+		t.Fatalf("decode opening stock: %v", err)
+	}
+	if movement.MaterialID != "material-1" || movement.Quantity != 10 || movement.Actor != "admin" {
+		t.Fatalf("opening stock = %+v, want material-1 quantity 10 by authenticated admin", movement)
+	}
+	if scope.runCount != 1 || len(scope.auditRecords) != 1 {
+		t.Fatalf("transaction calls = %d and audit events = %d, want one each", scope.runCount, len(scope.auditRecords))
+	}
+	if got := scope.auditRecords[0]; got != (transactionAuditRecord{actor: "admin", action: "opened stock", entity: "manufacturing:material-stock:material-1"}) {
+		t.Fatalf("opening audit = %+v, want authenticated admin stock-opening event", got)
+	}
+	if onHand, err := service.MaterialOnHand("material-1"); err != nil || onHand != 10 {
+		t.Fatalf("material on hand = %d, err %v; want 10", onHand, err)
+	}
+}
+
+func TestManufacturingHTTPProductionCannotOpenStockOrWriteBOM(t *testing.T) {
+	h, scope, service, finished := manufacturingHTTPTestHandler(t)
+	productionToken := loginAs(t, h, "production", "production123")
+	before := snapshotManufacturingHTTPState(t, service, finished)
+
+	for _, test := range []struct {
+		name string
+		path string
+		body map[string]any
+	}{
+		{
+			name: "opening stock",
+			path: "/api/manufacturing/material-stock/openings",
+			body: map[string]any{"materialId": "material-1", "unit": "m2", "quantity": 10},
+		},
+		{
+			name: "BOM write",
+			path: "/api/manufacturing/boms",
+			body: map[string]any{"id": "bom-denied", "revision": 1, "variantId": "variant-1", "materialId": "material-1", "quantityPerUnit": 2, "unit": "m2"},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			resp := performRequest(t, h, http.MethodPost, test.path, test.body, productionToken)
+			assertContractError(t, resp, http.StatusForbidden, "forbidden")
+		})
+	}
+
+	after := snapshotManufacturingHTTPState(t, service, finished)
+	if !reflect.DeepEqual(after, before) {
+		t.Fatalf("forbidden manufacturing writes changed state:\nbefore: %+v\nafter:  %+v", before, after)
+	}
+	if scope.runCount != 0 || len(scope.auditRecords) != 0 {
+		t.Fatalf("forbidden writes entered %d transactions and recorded %d audits, want neither", scope.runCount, len(scope.auditRecords))
+	}
+}
+
+func TestManufacturingHTTPProductionReadsAndCompletesWorkOrder(t *testing.T) {
+	h, scope, service, finished := manufacturingHTTPTestHandler(t)
+	adminToken := loginAs(t, h, "admin", "admin123")
+	productionToken := loginAs(t, h, "production", "production123")
+
+	resp := performRequest(t, h, http.MethodPost, "/api/manufacturing/material-stock/openings", map[string]any{
+		"materialId": "material-1", "unit": "m2", "quantity": 20,
+	}, adminToken)
+	if resp.Code != http.StatusCreated {
+		t.Fatalf("opening stock status = %d, want 201: %s", resp.Code, resp.Body.String())
+	}
+	resp = performRequest(t, h, http.MethodPost, "/api/manufacturing/boms", map[string]any{
+		"id": "bom-1", "revision": 1, "variantId": "variant-1", "materialId": "material-1", "quantityPerUnit": 2, "unit": "m2", "createdBy": "forged",
+	}, adminToken)
+	if resp.Code != http.StatusCreated {
+		t.Fatalf("BOM create status = %d, want 201: %s", resp.Code, resp.Body.String())
+	}
+	var bom manufacturing.BOM
+	if err := json.Unmarshal(resp.Body.Bytes(), &bom); err != nil {
+		t.Fatalf("decode created BOM: %v", err)
+	}
+	if bom.CreatedBy != "admin" {
+		t.Fatalf("BOM creator = %q, want authenticated admin", bom.CreatedBy)
+	}
+
+	resp = performRequest(t, h, http.MethodGet, "/api/manufacturing/materials/material-1/balance", nil, productionToken)
+	if resp.Code != http.StatusOK {
+		t.Fatalf("material stock read status = %d, want 200: %s", resp.Code, resp.Body.String())
+	}
+	var stock struct {
+		MaterialID string `json:"materialId"`
+		OnHand     int    `json:"onHand"`
+	}
+	if err := json.Unmarshal(resp.Body.Bytes(), &stock); err != nil {
+		t.Fatalf("decode material stock: %v", err)
+	}
+	if stock.MaterialID != "material-1" || stock.OnHand != 20 {
+		t.Fatalf("material stock = %+v, want material-1 with 20 on hand", stock)
+	}
+	resp = performRequest(t, h, http.MethodGet, "/api/manufacturing/boms", nil, productionToken)
+	if resp.Code != http.StatusOK {
+		t.Fatalf("BOM list status = %d, want 200: %s", resp.Code, resp.Body.String())
+	}
+	var boms []manufacturing.BOM
+	if err := json.Unmarshal(resp.Body.Bytes(), &boms); err != nil || len(boms) != 1 || boms[0].ID != "bom-1" {
+		t.Fatalf("BOM list = %#v, decode error %v; want bom-1", boms, err)
+	}
+	resp = performRequest(t, h, http.MethodGet, "/api/manufacturing/work-orders", nil, productionToken)
+	if resp.Code != http.StatusOK {
+		t.Fatalf("initial work-order list status = %d, want 200: %s", resp.Code, resp.Body.String())
+	}
+
+	resp = performRequest(t, h, http.MethodPost, "/api/manufacturing/work-orders", map[string]any{
+		"id": "wo-1", "bomId": "bom-1", "plannedQty": 3, "actor": "forged",
+	}, productionToken)
+	if resp.Code != http.StatusCreated {
+		t.Fatalf("work-order create status = %d, want 201: %s", resp.Code, resp.Body.String())
+	}
+	var order manufacturing.WorkOrder
+	if err := json.Unmarshal(resp.Body.Bytes(), &order); err != nil {
+		t.Fatalf("decode created work order: %v", err)
+	}
+	if order.CreatedBy != "production" || order.PlannedQty != 3 || order.Status != manufacturing.WorkOrderDraft {
+		t.Fatalf("created work order = %+v, want production-created draft for three units", order)
+	}
+	resp = performRequest(t, h, http.MethodGet, "/api/manufacturing/work-orders", nil, productionToken)
+	if resp.Code != http.StatusOK {
+		t.Fatalf("work-order list status = %d, want 200: %s", resp.Code, resp.Body.String())
+	}
+	var orders []manufacturing.WorkOrder
+	if err := json.Unmarshal(resp.Body.Bytes(), &orders); err != nil || len(orders) != 1 || orders[0].ID != "wo-1" {
+		t.Fatalf("work-order list = %#v, decode error %v; want wo-1", orders, err)
+	}
+
+	resp = performRequest(t, h, http.MethodPost, "/api/manufacturing/work-orders/wo-1/release", nil, productionToken)
+	if resp.Code != http.StatusOK {
+		t.Fatalf("work-order release status = %d, want 200: %s", resp.Code, resp.Body.String())
+	}
+	resp = performRequest(t, h, http.MethodPost, "/api/manufacturing/work-orders/wo-1/complete", map[string]any{
+		"goodQty": 2, "consumption": 1, "actor": "forged",
+	}, productionToken)
+	if resp.Code != http.StatusOK {
+		t.Fatalf("work-order completion status = %d, want 200: %s", resp.Code, resp.Body.String())
+	}
+	if order, err := service.GetWorkOrder("wo-1"); err != nil || order.Status != manufacturing.WorkOrderCompleted || order.GoodQty != 2 || order.CompletedBy != "production" {
+		t.Fatalf("completed work order = %+v, err %v; want completed by authenticated production user", order, err)
+	}
+	movements, err := service.ListMaterialMovements()
+	if err != nil {
+		t.Fatalf("list material movements: %v", err)
+	}
+	var consumption manufacturing.MaterialMovement
+	for _, movement := range movements {
+		if movement.Kind == manufacturing.MovementConsumption {
+			consumption = movement
+		}
+	}
+	if consumption.Quantity != 6 || consumption.Actor != "production" || consumption.WorkOrderID != "wo-1" {
+		t.Fatalf("work-order consumption = %+v, want planned quantity 3 * BOM quantity 2 by production", consumption)
+	}
+	if onHand, err := service.MaterialOnHand("material-1"); err != nil || onHand != 14 {
+		t.Fatalf("material on hand after completion = %d, err %v; want 14", onHand, err)
+	}
+	variant, err := finished.Get("variant-1")
+	if err != nil || variant.Stock != 2 {
+		t.Fatalf("finished stock after completion = %d, err %v; want 2", variant.Stock, err)
+	}
+
+	before := snapshotManufacturingHTTPState(t, service, finished)
+	previousAuditCount := len(scope.auditRecords)
+	resp = performRequest(t, h, http.MethodPost, "/api/manufacturing/work-orders/wo-1/complete", map[string]any{"goodQty": 1}, productionToken)
+	assertContractError(t, resp, http.StatusBadRequest, "only released work orders can be completed")
+	after := snapshotManufacturingHTTPState(t, service, finished)
+	if !reflect.DeepEqual(after, before) || len(scope.auditRecords) != previousAuditCount {
+		t.Fatalf("rejected repeated completion changed state/audit:\nbefore: %+v\nafter:  %+v\naudit count: %d -> %d", before, after, previousAuditCount, len(scope.auditRecords))
+	}
+	if len(scope.auditRecords) != 5 {
+		t.Fatalf("manufacturing audit count = %d, want 5 successful transitions", len(scope.auditRecords))
+	}
+	wantAudit := []transactionAuditRecord{
+		{actor: "admin", action: "opened stock", entity: "manufacturing:material-stock:material-1"},
+		{actor: "admin", action: "saved", entity: "manufacturing:bom:bom-1"},
+		{actor: "production", action: "created", entity: "manufacturing:work-order:wo-1"},
+		{actor: "production", action: "released", entity: "manufacturing:work-order:wo-1"},
+		{actor: "production", action: "completed", entity: "manufacturing:work-order:wo-1"},
+	}
+	if !reflect.DeepEqual(scope.auditRecords, wantAudit) {
+		t.Fatalf("manufacturing audit records = %#v, want %#v", scope.auditRecords, wantAudit)
+	}
+}
+
+func TestManufacturingHTTPMutationsFailClosedWithoutTransactionService(t *testing.T) {
+	root := t.TempDir()
+	raw := rawmaterials.New(store.NewMemoryRepository([]rawmaterials.RawMaterial{{ID: "material-1", Name: "Leather", Unit: "m2"}}, func(item rawmaterials.RawMaterial) string { return item.ID }))
+	finished := finishedgoods.New(store.NewMemoryRepository([]finishedgoods.FinishedProductVariant{{ID: "variant-1", Style: "Oxford", Size: "40", Color: "Black"}}, func(item finishedgoods.FinishedProductVariant) string { return item.ID }))
+	service := manufacturing.New(
+		store.NewMemoryRepository([]manufacturing.BOM{}, func(item manufacturing.BOM) string { return item.ID }),
+		store.NewMemoryRepository([]manufacturing.WorkOrder{}, func(item manufacturing.WorkOrder) string { return item.ID }),
+		store.NewMemoryRepository([]manufacturing.MaterialMovement{}, func(item manufacturing.MaterialMovement) string { return item.ID }),
+		raw,
+		finished,
+	)
+	modules := &Modules{Manufacturing: service}
+
+	for _, test := range []struct {
+		name    string
+		handler func(auth.SessionService, *audit.Store) http.Handler
+	}{
+		{
+			name: "nil injected scope",
+			handler: func(sessions auth.SessionService, auditStore *audit.Store) http.Handler {
+				return NewHandlerWithTransactionScope(modules, sessions, auditStore, web.NewUI(), nil)
+			},
+		},
+		{
+			name: "scope without manufacturing service",
+			handler: func(sessions auth.SessionService, auditStore *audit.Store) http.Handler {
+				return NewHandlerWithTransactionScope(modules, sessions, auditStore, web.NewUI(), newRecordingTransactionScope())
+			},
+		},
+		{
+			name: "legacy constructor cannot mutate manufacturing",
+			handler: func(sessions auth.SessionService, auditStore *audit.Store) http.Handler {
+				return NewHandler(modules, sessions.(*auth.SessionStore), auditStore, web.NewUI())
+			},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			auditStore := audit.NewStore(filepath.Join(root, test.name+"-audit.json"))
+			sessions := auth.NewSessionStore(filepath.Join(root, test.name+"-sessions.json"), []auth.UserAccount{
+				auth.NewUserAccount("admin", "admin123", "administrador"),
+			})
+			h := test.handler(sessions, auditStore)
+			token := loginAs(t, h, "admin", "admin123")
+			resp := performRequest(t, h, http.MethodPost, "/api/manufacturing/material-stock/openings", map[string]any{
+				"materialId": "material-1", "unit": "m2", "quantity": 10,
+			}, token)
+			if resp.Code != http.StatusInternalServerError || strings.TrimSpace(resp.Body.String()) != `{"error":"internal server error"}` {
+				t.Fatalf("opening without transaction service = %d %s, want generic 500", resp.Code, resp.Body.String())
+			}
+			if onHand, err := service.MaterialOnHand("material-1"); err != nil || onHand != 0 {
+				t.Fatalf("opening without transaction service changed stock to %d, err %v", onHand, err)
+			}
+			if events := auditStore.List(); len(events) != 0 {
+				t.Fatalf("opening without transaction service recorded audit events: %#v", events)
+			}
+		})
+	}
+}
+
+func TestManufacturingHTTPMapsMalformedMissingAndInsufficientStockErrors(t *testing.T) {
+	h, scope, service, finished := manufacturingHTTPTestHandler(t)
+	adminToken := loginAs(t, h, "admin", "admin123")
+	productionToken := loginAs(t, h, "production", "production123")
+
+	before := snapshotManufacturingHTTPState(t, service, finished)
+	resp := performRawRequest(t, h, http.MethodPost, "/api/manufacturing/material-stock/openings", `{"materialId":`, adminToken)
+	assertContractError(t, resp, http.StatusBadRequest, "unexpected EOF")
+	resp = performRequest(t, h, http.MethodPost, "/api/manufacturing/material-stock/openings", map[string]any{
+		"materialId": "missing", "unit": "m2", "quantity": 1,
+	}, adminToken)
+	if resp.Code != http.StatusNotFound {
+		t.Fatalf("opening missing material status = %d, want 404: %s", resp.Code, resp.Body.String())
+	}
+	resp = performRequest(t, h, http.MethodPost, "/api/manufacturing/material-stock/openings", map[string]any{
+		"materialId": "material-1", "unit": "m2", "quantity": 0,
+	}, adminToken)
+	if resp.Code != http.StatusBadRequest {
+		t.Fatalf("zero opening quantity status = %d, want 400: %s", resp.Code, resp.Body.String())
+	}
+	after := snapshotManufacturingHTTPState(t, service, finished)
+	if !reflect.DeepEqual(after, before) || len(scope.auditRecords) != 0 {
+		t.Fatalf("rejected opening changed state/audit:\nbefore: %+v\nafter:  %+v\naudits: %#v", before, after, scope.auditRecords)
+	}
+
+	for _, step := range []struct {
+		path string
+		body map[string]any
+	}{
+		{path: "/api/manufacturing/material-stock/openings", body: map[string]any{"materialId": "material-1", "unit": "m2", "quantity": 5}},
+		{path: "/api/manufacturing/boms", body: map[string]any{"id": "bom-1", "revision": 1, "variantId": "variant-1", "materialId": "material-1", "quantityPerUnit": 2, "unit": "m2"}},
+	} {
+		resp = performRequest(t, h, http.MethodPost, step.path, step.body, adminToken)
+		if resp.Code != http.StatusCreated {
+			t.Fatalf("setup POST %s status = %d, want 201: %s", step.path, resp.Code, resp.Body.String())
+		}
+	}
+	resp = performRequest(t, h, http.MethodPost, "/api/manufacturing/work-orders", map[string]any{"id": "wo-1", "bomId": "bom-1", "plannedQty": 3}, productionToken)
+	if resp.Code != http.StatusCreated {
+		t.Fatalf("setup work-order status = %d, want 201: %s", resp.Code, resp.Body.String())
+	}
+	resp = performRequest(t, h, http.MethodPost, "/api/manufacturing/work-orders/wo-1/release", nil, productionToken)
+	if resp.Code != http.StatusOK {
+		t.Fatalf("setup release status = %d, want 200: %s", resp.Code, resp.Body.String())
+	}
+	before = snapshotManufacturingHTTPState(t, service, finished)
+	previousAuditCount := len(scope.auditRecords)
+	resp = performRequest(t, h, http.MethodPost, "/api/manufacturing/work-orders/wo-1/complete", map[string]any{"goodQty": 2}, productionToken)
+	if resp.Code != http.StatusBadRequest {
+		t.Fatalf("insufficient-stock completion status = %d, want 400: %s", resp.Code, resp.Body.String())
+	}
+	after = snapshotManufacturingHTTPState(t, service, finished)
+	if !reflect.DeepEqual(after, before) || len(scope.auditRecords) != previousAuditCount {
+		t.Fatalf("insufficient-stock rejection changed state/audit:\nbefore: %+v\nafter:  %+v\naudits: %d -> %d", before, after, previousAuditCount, len(scope.auditRecords))
+	}
+}
+
+func TestManufacturingHTTPRejectsTrailingJSONValues(t *testing.T) {
+	requests := []struct {
+		name     string
+		path     string
+		body     string
+		username string
+		setup    func(*testing.T, *manufacturing.Service)
+	}{
+		{
+			name: "opening stock",
+			path: "/api/manufacturing/material-stock/openings",
+			body: `{"materialId":"material-1","unit":"m2","quantity":1}`,
+		},
+		{
+			name: "BOM",
+			path: "/api/manufacturing/boms",
+			body: `{"id":"bom-1","revision":1,"variantId":"variant-1","materialId":"material-1","quantityPerUnit":1,"unit":"m2"}`,
+		},
+		{
+			name: "work order",
+			path: "/api/manufacturing/work-orders",
+			body: `{"id":"wo-1","bomId":"bom-1","plannedQty":1}`,
+			setup: func(t *testing.T, service *manufacturing.Service) {
+				if _, err := service.SaveBOM(manufacturing.BOM{ID: "bom-1", Revision: 1, VariantID: "variant-1", MaterialID: "material-1", QuantityPerUnit: 1, Unit: "m2"}, "admin"); err != nil {
+					t.Fatalf("seed BOM: %v", err)
+				}
+			},
+		},
+		{
+			name:     "work-order completion",
+			path:     "/api/manufacturing/work-orders/wo-1/complete",
+			body:     `{"goodQty":1}`,
+			username: "production",
+			setup: func(t *testing.T, service *manufacturing.Service) {
+				if _, err := service.SaveBOM(manufacturing.BOM{ID: "bom-1", Revision: 1, VariantID: "variant-1", MaterialID: "material-1", QuantityPerUnit: 1, Unit: "m2"}, "admin"); err != nil {
+					t.Fatalf("seed BOM: %v", err)
+				}
+				if _, err := service.OpenStock("material-1", "m2", 1, "admin"); err != nil {
+					t.Fatalf("seed material stock: %v", err)
+				}
+				if _, err := service.CreateWorkOrder("wo-1", "bom-1", 1, "production"); err != nil {
+					t.Fatalf("seed work order: %v", err)
+				}
+				if _, err := service.ReleaseWorkOrder("wo-1", "production"); err != nil {
+					t.Fatalf("release work order: %v", err)
+				}
+			},
+		},
+	}
+	for _, request := range requests {
+		for _, suffix := range []struct {
+			name  string
+			value string
+		}{
+			{name: "trailing junk", value: " junk"},
+			{name: "second JSON value", value: ` {}`},
+		} {
+			t.Run(request.name+"/"+suffix.name, func(t *testing.T) {
+				h, scope, service, _ := manufacturingHTTPTestHandler(t)
+				if request.setup != nil {
+					request.setup(t, service)
+				}
+				username := request.username
+				if username == "" {
+					username = "admin"
+				}
+				password := username + "123"
+				token := loginAs(t, h, username, password)
+				resp := performRawRequest(t, h, http.MethodPost, request.path, request.body+suffix.value, token)
+				if resp.Code != http.StatusBadRequest {
+					t.Fatalf("status = %d, want 400 for one JSON value: %s", resp.Code, resp.Body.String())
+				}
+				if scope.runCount != 0 || len(scope.auditRecords) != 0 {
+					t.Fatalf("invalid body entered %d transactions and recorded %d audits, want neither", scope.runCount, len(scope.auditRecords))
+				}
+			})
+		}
+	}
+}
+
+func TestManufacturingHTTPLargeTrailingDataReturnsPayloadTooLarge(t *testing.T) {
+	h, scope, _, _ := manufacturingHTTPTestHandler(t)
+	token := loginAs(t, h, "admin", "admin123")
+	body := `{"materialId":"material-1","unit":"m2","quantity":1}` + strings.Repeat("x", int(requestBodyLimit)+1)
+	resp := performRawRequest(t, h, http.MethodPost, "/api/manufacturing/material-stock/openings", body, token)
+	if resp.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("status = %d, want 413 for oversized trailing body: %s", resp.Code, resp.Body.String())
+	}
+	if scope.runCount != 0 || len(scope.auditRecords) != 0 {
+		t.Fatalf("oversized body entered %d transactions and recorded %d audits, want neither", scope.runCount, len(scope.auditRecords))
+	}
+}
+
+func TestManufacturingHTTPBalanceAllowsMaterialIDOpenings(t *testing.T) {
+	h, _, _, _ := manufacturingHTTPTestHandler(t)
+	token := loginAs(t, h, "admin", "admin123")
+
+	resp := performRequest(t, h, http.MethodPost, "/api/manufacturing/material-stock/openings", map[string]any{
+		"materialId": "openings", "unit": "m2", "quantity": 7,
+	}, token)
+	if resp.Code != http.StatusCreated {
+		t.Fatalf("opening stock status = %d, want 201: %s", resp.Code, resp.Body.String())
+	}
+	resp = performRequest(t, h, http.MethodGet, "/api/manufacturing/materials/openings/balance", nil, token)
+	if resp.Code != http.StatusOK {
+		t.Fatalf("GET balance for material ID openings = %d, want 200: %s", resp.Code, resp.Body.String())
+	}
+	var balance struct {
+		MaterialID string `json:"materialId"`
+		OnHand     int    `json:"onHand"`
+	}
+	if err := json.Unmarshal(resp.Body.Bytes(), &balance); err != nil {
+		t.Fatalf("decode material balance: %v", err)
+	}
+	if balance.MaterialID != "openings" || balance.OnHand != 7 {
+		t.Fatalf("material balance = %+v, want openings with 7 on hand", balance)
+	}
+}
+
+func manufacturingHTTPTestHandler(t *testing.T) (http.Handler, *manufacturingRecordingTransactionScope, *manufacturing.Service, *finishedgoods.Service) {
+	t.Helper()
+	root := t.TempDir()
+	raw := rawmaterials.New(store.NewMemoryRepository([]rawmaterials.RawMaterial{
+		{ID: "material-1", Name: "Leather", Unit: "m2"},
+		{ID: "openings", Name: "Openings", Unit: "m2"},
+	}, func(item rawmaterials.RawMaterial) string { return item.ID }))
+	finished := finishedgoods.New(store.NewMemoryRepository([]finishedgoods.FinishedProductVariant{{ID: "variant-1", Style: "Oxford", Size: "40", Color: "Black"}}, func(item finishedgoods.FinishedProductVariant) string { return item.ID }))
+	service := manufacturing.New(
+		store.NewMemoryRepository([]manufacturing.BOM{}, func(item manufacturing.BOM) string { return item.ID }),
+		store.NewMemoryRepository([]manufacturing.WorkOrder{}, func(item manufacturing.WorkOrder) string { return item.ID }),
+		store.NewMemoryRepository([]manufacturing.MaterialMovement{}, func(item manufacturing.MaterialMovement) string { return item.ID }),
+		raw,
+		finished,
+	)
+	scope := &manufacturingRecordingTransactionScope{service: service}
+	scope.services = TransactionServices{
+		Manufacturing: service,
+		RecordAudit: func(actor, action, entity string) error {
+			if scope.auditErr != nil {
+				return scope.auditErr
+			}
+			scope.auditRecords = append(scope.auditRecords, transactionAuditRecord{actor: actor, action: action, entity: entity})
+			return nil
+		},
+	}
+	sessions := auth.NewSessionStore(filepath.Join(root, "sessions.json"), []auth.UserAccount{
+		auth.NewUserAccount("admin", "admin123", "administrador"),
+		auth.NewUserAccount("production", "production123", "produccion"),
+	})
+	h := NewHandlerWithTransactionScope(&Modules{Manufacturing: service}, sessions, audit.NewStore(filepath.Join(root, "audit.json")), web.NewUI(), scope)
+	return h, scope, service, finished
+}
+
+type manufacturingRecordingTransactionScope struct {
+	services     TransactionServices
+	service      *manufacturing.Service
+	runCount     int
+	auditErr     error
+	auditRecords []transactionAuditRecord
+}
+
+func (scope *manufacturingRecordingTransactionScope) Run(_ context.Context, operation func(TransactionServices) error) error {
+	scope.runCount++
+	return operation(scope.services)
+}
+
+type manufacturingHTTPState struct {
+	BOMs      []manufacturing.BOM
+	Orders    []manufacturing.WorkOrder
+	Movements []manufacturing.MaterialMovement
+	OnHand    int
+	Stock     int
+}
+
+func snapshotManufacturingHTTPState(t *testing.T, service *manufacturing.Service, finished *finishedgoods.Service) manufacturingHTTPState {
+	t.Helper()
+	boms, err := service.ListBOMs()
+	if err != nil {
+		t.Fatalf("list manufacturing BOMs: %v", err)
+	}
+	orders, err := service.ListWorkOrders()
+	if err != nil {
+		t.Fatalf("list manufacturing work orders: %v", err)
+	}
+	movements, err := service.ListMaterialMovements()
+	if err != nil {
+		t.Fatalf("list material movements: %v", err)
+	}
+	onHand, err := service.MaterialOnHand("material-1")
+	if err != nil {
+		t.Fatalf("read material on hand: %v", err)
+	}
+	variant, err := finished.Get("variant-1")
+	if err != nil {
+		t.Fatalf("read finished variant: %v", err)
+	}
+	return manufacturingHTTPState{BOMs: boms, Orders: orders, Movements: movements, OnHand: onHand, Stock: variant.Stock}
+}
+
+func performRawRequest(t *testing.T, h http.Handler, method, path, body, token string) *httptest.ResponseRecorder {
+	t.Helper()
+	req := httptest.NewRequest(method, path, strings.NewReader(body))
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
+	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
 	return rec

@@ -5,8 +5,8 @@ This document describes the routes and behavior currently implemented by `intern
 ## General behavior
 
 - JSON success and error responses use `Content-Type: application/json; charset=utf-8`. JSON errors have the shape `{"error":"..."}`. Lists are JSON arrays; single resources are JSON objects.
-- Endpoints that decode JSON expect a JSON body, but the handlers do not enforce the request `Content-Type`. The request-body limit is 1 MiB. Invalid JSON returns `400`; an oversized decoded body returns `413`.
-- Successful list/detail reads return `200`. Successful resource POSTs return `201` (including an upsert to an existing ID); stock adjustment and invoice issue return `200`; deletes return `204` with no response body.
+- Endpoints that decode JSON expect a JSON body, but the handlers do not enforce the request `Content-Type`. The request-body limit is 1 MiB. Invalid JSON returns `400`; a body read past the limit returns `413`. Manufacturing body handlers require exactly one JSON value and reject trailing data.
+- Successful list/detail reads return `200`. Successful resource POSTs return `201` (including an upsert to an existing ID); stock adjustment, invoice issue, and manufacturing work-order transitions return `200`; deletes return `204` with no response body.
 - Validation failures return `400`, missing resources return `404`, and operational failures return `500` with `{"error":"internal server error"}`. Missing/invalid-auth behavior on protected routes is described below; it does not consistently follow a `401`/`403` split.
 - `X-Request-Id` is echoed when supplied and generated when absent. A non-empty `Traceparent` is echoed. The server also sets baseline browser headers; see [`security-backlog.md`](security-backlog.md) for the limits of those protections.
 
@@ -59,6 +59,14 @@ All routes below, except where identified as public, are capability-protected as
 | `GET /api/logistics` | `logistics:read` | `200` JSON array of storage slots. |
 | `POST /api/logistics` | `logistics:write` | JSON storage slot; `201` saved slot. |
 | `DELETE /api/logistics/{id}` | `logistics:write` | `204`; missing ID returns `404`. |
+| `POST /api/manufacturing/material-stock/openings` | `manufacturing:opening-stock:write` | JSON opening-stock request; `201` material movement. Administrator only. |
+| `GET /api/manufacturing/materials/{materialId}/balance` | `manufacturing:read` | `200` object with `materialId` and integer `onHand`; missing material returns `404`. |
+| `GET /api/manufacturing/boms` | `manufacturing:read` | `200` JSON array of BOM revisions. |
+| `POST /api/manufacturing/boms` | `manufacturing:boms:write` | JSON BOM revision; `201` saved BOM. Administrator only. |
+| `GET /api/manufacturing/work-orders` | `manufacturing:read` | `200` JSON array of work orders. |
+| `POST /api/manufacturing/work-orders` | `manufacturing:work-orders:create` | JSON work-order request; `201` created draft work order. |
+| `POST /api/manufacturing/work-orders/{id}/release` | `manufacturing:work-orders:release` | No body required; `200` released work order. |
+| `POST /api/manufacturing/work-orders/{id}/complete` | `manufacturing:work-orders:complete` | JSON `goodQty`; `200` completed work order. |
 | `GET /api/invoices` | `billing:read` | `200` JSON array of invoices. |
 | `POST /api/invoices` | `billing:write` | JSON invoice; `201` saved invoice. |
 | `GET /api/invoices/{id}` | `billing:read` | `200` invoice; missing ID returns `404`. |
@@ -80,8 +88,22 @@ Dimensions are nested objects with `lengthCm`, `widthCm`, `heightCm`, and `weigh
 | Packaging spec | `id`, `name`, `transportMode`, `maxUnits`, `dimensions` | `id`, `name`, and `transportMode` required; `maxUnits` must be positive; dimensions validated. |
 | Storage slot | `id`, `name`, `zone`, `capacityUnits`, `dimensions` | `id`, `name`, and `zone` required; `capacityUnits` must be positive; dimensions validated. |
 | Invoice | `id`, `customerId`, `total`, `tax`, `status` | `customerId` required; `total` and `tax` must be non-negative. A blank `id` is generated. `status` defaults to `draft` and accepts `draft`, `issued`, `paid`, or `void`. The issue operation only accepts a draft invoice. |
+| Opening stock | `materialId`, `unit`, `quantity` | Quantity must be a positive integer and `unit` must match the material. The service allows only one opening balance per material. The response is a material movement; its actor is derived from the authenticated session. |
+| BOM revision | `id`, `revision`, `variantId`, `materialId`, `quantityPerUnit`, `unit` | All identifiers are required, revision starts at 1 and increases by one, quantity must be a positive integer, and unit must match the raw material. Actor and creation time are assigned by the service. |
+| Work order | `id`, `bomId`, `plannedQty` | Identifiers are required and `plannedQty` must be a positive integer. The response is a draft pinned to the BOM revision; the authenticated session supplies its creator. |
+| Work-order completion | `goodQty` | Must be positive and no greater than `plannedQty`. Material consumption is computed by the service as `plannedQty × quantityPerUnit`, not supplied by the client; the authenticated session supplies the completion actor. |
 
 The invoice POST handler upserts by ID but still responds `201`. A successful issue changes the invoice status to `issued`; attempting to issue a non-draft invoice is a validation error (`400`).
+
+Manufacturing reads are available to `administrador` and `produccion`. Opening stock and BOM writes are administrator-only. Production can create, release, and complete work orders. Every manufacturing mutation runs through the injected transaction scope and writes its audit event only after the domain operation succeeds in that transaction. The request does not control actor identity or material consumption.
+
+The material-balance response has this shape:
+
+```json
+{"materialId":"leather","onHand":12}
+```
+
+BOM and work-order lists return arrays of the corresponding resource objects. Opening, BOM, work-order, release, and completion writes return the resulting `MaterialMovement`, `BOM`, or `WorkOrder` object as appropriate.
 
 ### FoxPro adapter result
 
@@ -121,16 +143,16 @@ at,actor,action,entity,module
 
 The public `/api/boot` route currently lists `administrador`, `almacen`, `produccion`, `ventas`, `contabilidad`, and `auditoria`. This matrix describes the server-side capability checks for protected resource routes; it does not imply a consistent authentication status code.
 
-| Role | Raw materials | Finished goods | Packaging | Logistics | Invoices | Audit | FoxPro |
-|---|---|---|---|---|---|---|---|
-| `administrador` | Read + write | Read + write | Read + write | Read + write | Read + write | Read | Read + sync |
-| `almacen` | Read + write | Read + write | Read + write | Read + write | — | — | — |
-| `produccion` | Read + write | Read + write | Read + write | Read only | — | — | — |
-| `ventas` | — | Read only | — | — | Read + write | — | — |
-| `contabilidad` | — | — | — | — | Read + write | — | — |
-| `auditoria` | Read only | Read only | Read only | Read only | Read only | Read | — |
+| Role | Raw materials | Finished goods | Packaging | Logistics | Manufacturing | Invoices | Audit | FoxPro |
+|---|---|---|---|---|---|---|---|---|
+| `administrador` | Read + write | Read + write | Read + write | Read + write | Read + opening stock + BOM write + work-order create/release/complete | Read + write | Read | Read + sync |
+| `almacen` | Read + write | Read + write | Read + write | Read + write | — | — | — | — |
+| `produccion` | Read + write | Read + write | Read + write | Read only | Read + work-order create/release/complete | — | — | — |
+| `ventas` | — | Read only | — | — | — | Read + write | — | — |
+| `contabilidad` | — | — | — | — | — | Read + write | — | — |
+| `auditoria` | Read only | Read only | Read only | Read only | — | Read only | Read | — |
 
-Here, write covers resource creation/update operations and deletes where those routes exist. For invoices it includes creation/upsert and issuing; for FoxPro the two capabilities are read status and trigger sync.
+Manufacturing permissions are granular: `manufacturing:read`, `manufacturing:opening-stock:write`, `manufacturing:boms:write`, and separate `manufacturing:work-orders:create`, `manufacturing:work-orders:release`, and `manufacturing:work-orders:complete` capabilities. Existing permissions for other resources do not grant manufacturing access. For other resources, write covers resource creation/update operations and deletes where those routes exist. For invoices it includes creation/upsert and issuing; for FoxPro the two capabilities are read status and trigger sync.
 
 ## Status and method details
 
@@ -138,7 +160,7 @@ Here, write covers resource creation/update operations and deletes where those r
 - `401 Unauthorized`: rejected login or missing/invalid bearer token on `/api/me`.
 - `403 Forbidden`: insufficient role capability, and currently also missing/invalid authentication on protected resource routes.
 - `404 Not Found`: unknown route/resource. The current `/api/finished-goods/{id}` handler returns `404` for unsupported methods rather than `405`.
-- `405 Method Not Allowed`: used by some handlers, but method handling is not uniform. Some method errors have no `Allow` header (including `/health`, `/api/me`, `/api/boot`, and the audit routes); do not treat `Allow` as a complete route inventory.
+- `405 Method Not Allowed`: used by some handlers, but method handling is not uniform. Manufacturing list routes and stock reads return `Allow: GET` or `Allow: GET, POST`; work-order transitions and opening stock return `Allow: POST`. Some other method errors have no `Allow` header (including `/health`, `/api/me`, `/api/boot`, and the audit routes); do not treat `Allow` as a complete route inventory.
 - `413 Payload Too Large`: decoded JSON body exceeds 1 MiB.
 - `500 Internal Server Error`: operational failure; response body is generic and does not expose the underlying error.
 

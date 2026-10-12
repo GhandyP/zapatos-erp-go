@@ -89,3 +89,36 @@ func TestProduccionAsymmetricLogistics(t *testing.T) {
 		t.Error("expected produccion NOT to have logistics:write")
 	}
 }
+
+func TestManufacturingPermissions(t *testing.T) {
+	productionAllowed := []string{
+		"manufacturing:read",
+		"manufacturing:work-orders:create",
+		"manufacturing:work-orders:release",
+		"manufacturing:work-orders:complete",
+	}
+	for _, permission := range productionAllowed {
+		if !Can("produccion", permission) {
+			t.Errorf("expected produccion to have %q", permission)
+		}
+		if !Can("administrador", permission) {
+			t.Errorf("expected administrador to have %q", permission)
+		}
+	}
+
+	productionDenied := []string{
+		"manufacturing:opening-stock:write",
+		"manufacturing:boms:write",
+	}
+	for _, permission := range productionDenied {
+		if Can("produccion", permission) {
+			t.Errorf("expected produccion NOT to have %q", permission)
+		}
+		if !Can("administrador", permission) {
+			t.Errorf("expected administrador to have %q", permission)
+		}
+	}
+	if Can("almacen", "manufacturing:read") {
+		t.Error("expected almacen NOT to have manufacturing read access")
+	}
+}

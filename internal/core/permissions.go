@@ -1,9 +1,18 @@
 package core
 
+const (
+	PermissionManufacturingRead              = "manufacturing:read"
+	PermissionManufacturingOpeningStock      = "manufacturing:opening-stock:write"
+	PermissionManufacturingBOMWrite          = "manufacturing:boms:write"
+	PermissionManufacturingWorkOrderCreate   = "manufacturing:work-orders:create"
+	PermissionManufacturingWorkOrderRelease  = "manufacturing:work-orders:release"
+	PermissionManufacturingWorkOrderComplete = "manufacturing:work-orders:complete"
+)
+
 var permissionsByRole = map[string][]string{
 	"administrador": {"*"},
 	"almacen":       {"raw-materials:read", "raw-materials:write", "finished-goods:read", "finished-goods:write", "packaging:read", "packaging:write", "logistics:read", "logistics:write"},
-	"produccion":    {"raw-materials:read", "raw-materials:write", "finished-goods:read", "finished-goods:write", "packaging:read", "packaging:write", "logistics:read"},
+	"produccion":    {"raw-materials:read", "raw-materials:write", "finished-goods:read", "finished-goods:write", "packaging:read", "packaging:write", "logistics:read", PermissionManufacturingRead, PermissionManufacturingWorkOrderCreate, PermissionManufacturingWorkOrderRelease, PermissionManufacturingWorkOrderComplete},
 	"ventas":        {"billing:read", "billing:write", "finished-goods:read"},
 	"contabilidad":  {"billing:read", "billing:write"},
 	"auditoria":     {"audit:read", "raw-materials:read", "finished-goods:read", "billing:read", "packaging:read", "logistics:read"},

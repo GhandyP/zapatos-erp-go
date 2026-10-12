@@ -1,6 +1,7 @@
 package server
 
 import (
+	"bytes"
 	"context"
 	"encoding/csv"
 	"encoding/json"
@@ -22,6 +23,7 @@ import (
 	"zapatos-erp-go/internal/modules/billing"
 	"zapatos-erp-go/internal/modules/finishedgoods"
 	"zapatos-erp-go/internal/modules/logistics"
+	"zapatos-erp-go/internal/modules/manufacturing"
 	"zapatos-erp-go/internal/modules/packaging"
 	"zapatos-erp-go/internal/modules/rawmaterials"
 	"zapatos-erp-go/internal/observability"
@@ -43,6 +45,7 @@ type Modules struct {
 	Packaging     *packaging.Service
 	Logistics     *logistics.Service
 	Billing       *billing.Service
+	Manufacturing *manufacturing.Service
 	Foxpro        *foxpro.Adapter
 }
 
@@ -633,6 +636,21 @@ func newHandler(modules *Modules, sessions auth.SessionService, auditStore audit
 		}
 		methodNotAllowed(w, "GET, POST")
 	})
+	mux.HandleFunc("/api/manufacturing/material-stock/openings", func(w http.ResponseWriter, r *http.Request) {
+		handleManufacturingStockOpening(w, r, sessions, transactionScope)
+	})
+	mux.HandleFunc("/api/manufacturing/materials/", func(w http.ResponseWriter, r *http.Request) {
+		handleManufacturingMaterialBalanceRead(w, r, modules, sessions)
+	})
+	mux.HandleFunc("/api/manufacturing/boms", func(w http.ResponseWriter, r *http.Request) {
+		handleManufacturingBOMs(w, r, modules, sessions, transactionScope)
+	})
+	mux.HandleFunc("/api/manufacturing/work-orders", func(w http.ResponseWriter, r *http.Request) {
+		handleManufacturingWorkOrders(w, r, modules, sessions, transactionScope)
+	})
+	mux.HandleFunc("/api/manufacturing/work-orders/", func(w http.ResponseWriter, r *http.Request) {
+		handleManufacturingWorkOrderTransition(w, r, sessions, transactionScope)
+	})
 	mux.HandleFunc("/api/foxpro", func(w http.ResponseWriter, r *http.Request) {
 		_, session, _ := currentSession(r, sessions)
 		role := session.Role
@@ -736,6 +754,261 @@ func newHandler(modules *Modules, sessions auth.SessionService, auditStore audit
 		_, _ = io.WriteString(w, ui.Render())
 	})
 	return obs.Wrap(withHardening(mux))
+}
+
+func handleManufacturingStockOpening(w http.ResponseWriter, r *http.Request, sessions auth.SessionService, transactionScope TransactionScope) {
+	if r.Method != http.MethodPost {
+		methodNotAllowed(w, "POST")
+		return
+	}
+	_, session, _ := currentSession(r, sessions)
+	if !core.Can(session.Role, core.PermissionManufacturingOpeningStock) {
+		respondJSON(w, http.StatusForbidden, map[string]any{"error": "forbidden"})
+		return
+	}
+	var payload struct {
+		MaterialID string `json:"materialId"`
+		Unit       string `json:"unit"`
+		Quantity   int    `json:"quantity"`
+	}
+	if err := decodeManufacturingJSONBody(w, r, &payload); err != nil {
+		if isBodyTooLarge(err) {
+			respondError(w, http.StatusRequestEntityTooLarge, err)
+			return
+		}
+		respondError(w, http.StatusBadRequest, err)
+		return
+	}
+
+	var movement manufacturing.MaterialMovement
+	err := runMutation(r.Context(), transactionScope, func(services TransactionServices) error {
+		if services.Manufacturing == nil {
+			return errors.New("transaction scope has no manufacturing service")
+		}
+		var err error
+		movement, err = services.Manufacturing.OpenStock(payload.MaterialID, payload.Unit, payload.Quantity, actorName(session))
+		if err != nil {
+			return mutationServiceError(err)
+		}
+		return recordMutationAudit(services, actorName(session), "opened stock", "manufacturing:material-stock:"+movement.MaterialID)
+	})
+	if err != nil {
+		respondMutationError(w, err)
+		return
+	}
+	respondJSON(w, http.StatusCreated, movement)
+}
+
+func handleManufacturingMaterialBalanceRead(w http.ResponseWriter, r *http.Request, modules *Modules, sessions auth.SessionService) {
+	if r.Method != http.MethodGet {
+		methodNotAllowed(w, "GET")
+		return
+	}
+	_, session, _ := currentSession(r, sessions)
+	if !core.Can(session.Role, core.PermissionManufacturingRead) {
+		respondJSON(w, http.StatusForbidden, map[string]any{"error": "forbidden"})
+		return
+	}
+	path := strings.TrimPrefix(r.URL.Path, "/api/manufacturing/materials/")
+	parts := strings.Split(path, "/")
+	if len(parts) != 2 || parts[0] == "" || parts[1] != "balance" {
+		notFound(w)
+		return
+	}
+	materialID := parts[0]
+	if modules == nil || modules.Manufacturing == nil {
+		respondError(w, http.StatusInternalServerError, errors.New("manufacturing read service unavailable"))
+		return
+	}
+	onHand, err := modules.Manufacturing.MaterialOnHand(materialID)
+	if err != nil {
+		respondServiceError(w, err)
+		return
+	}
+	respondJSON(w, http.StatusOK, map[string]any{"materialId": materialID, "onHand": onHand})
+}
+
+func handleManufacturingBOMs(w http.ResponseWriter, r *http.Request, modules *Modules, sessions auth.SessionService, transactionScope TransactionScope) {
+	_, session, _ := currentSession(r, sessions)
+	switch r.Method {
+	case http.MethodGet:
+		if !core.Can(session.Role, core.PermissionManufacturingRead) {
+			respondJSON(w, http.StatusForbidden, map[string]any{"error": "forbidden"})
+			return
+		}
+		if modules == nil || modules.Manufacturing == nil {
+			respondError(w, http.StatusInternalServerError, errors.New("manufacturing read service unavailable"))
+			return
+		}
+		boms, err := modules.Manufacturing.ListBOMs()
+		if err != nil {
+			respondServiceError(w, err)
+			return
+		}
+		respondJSON(w, http.StatusOK, boms)
+	case http.MethodPost:
+		if !core.Can(session.Role, core.PermissionManufacturingBOMWrite) {
+			respondJSON(w, http.StatusForbidden, map[string]any{"error": "forbidden"})
+			return
+		}
+		var payload struct {
+			ID              string `json:"id"`
+			Revision        int    `json:"revision"`
+			VariantID       string `json:"variantId"`
+			MaterialID      string `json:"materialId"`
+			QuantityPerUnit int    `json:"quantityPerUnit"`
+			Unit            string `json:"unit"`
+		}
+		if err := decodeManufacturingJSONBody(w, r, &payload); err != nil {
+			if isBodyTooLarge(err) {
+				respondError(w, http.StatusRequestEntityTooLarge, err)
+				return
+			}
+			respondError(w, http.StatusBadRequest, err)
+			return
+		}
+		var saved manufacturing.BOM
+		err := runMutation(r.Context(), transactionScope, func(services TransactionServices) error {
+			if services.Manufacturing == nil {
+				return errors.New("transaction scope has no manufacturing service")
+			}
+			bom := manufacturing.BOM{
+				ID: payload.ID, Revision: payload.Revision, VariantID: payload.VariantID,
+				MaterialID: payload.MaterialID, QuantityPerUnit: payload.QuantityPerUnit, Unit: payload.Unit,
+			}
+			var err error
+			saved, err = services.Manufacturing.SaveBOM(bom, actorName(session))
+			if err != nil {
+				return mutationServiceError(err)
+			}
+			return recordMutationAudit(services, actorName(session), "saved", "manufacturing:bom:"+saved.ID)
+		})
+		if err != nil {
+			respondMutationError(w, err)
+			return
+		}
+		respondJSON(w, http.StatusCreated, saved)
+	default:
+		methodNotAllowed(w, "GET, POST")
+	}
+}
+
+func handleManufacturingWorkOrders(w http.ResponseWriter, r *http.Request, modules *Modules, sessions auth.SessionService, transactionScope TransactionScope) {
+	_, session, _ := currentSession(r, sessions)
+	switch r.Method {
+	case http.MethodGet:
+		if !core.Can(session.Role, core.PermissionManufacturingRead) {
+			respondJSON(w, http.StatusForbidden, map[string]any{"error": "forbidden"})
+			return
+		}
+		if modules == nil || modules.Manufacturing == nil {
+			respondError(w, http.StatusInternalServerError, errors.New("manufacturing read service unavailable"))
+			return
+		}
+		orders, err := modules.Manufacturing.ListWorkOrders()
+		if err != nil {
+			respondServiceError(w, err)
+			return
+		}
+		respondJSON(w, http.StatusOK, orders)
+	case http.MethodPost:
+		if !core.Can(session.Role, core.PermissionManufacturingWorkOrderCreate) {
+			respondJSON(w, http.StatusForbidden, map[string]any{"error": "forbidden"})
+			return
+		}
+		var payload struct {
+			ID         string `json:"id"`
+			BOMID      string `json:"bomId"`
+			PlannedQty int    `json:"plannedQty"`
+		}
+		if err := decodeManufacturingJSONBody(w, r, &payload); err != nil {
+			if isBodyTooLarge(err) {
+				respondError(w, http.StatusRequestEntityTooLarge, err)
+				return
+			}
+			respondError(w, http.StatusBadRequest, err)
+			return
+		}
+		var saved manufacturing.WorkOrder
+		err := runMutation(r.Context(), transactionScope, func(services TransactionServices) error {
+			if services.Manufacturing == nil {
+				return errors.New("transaction scope has no manufacturing service")
+			}
+			var err error
+			saved, err = services.Manufacturing.CreateWorkOrder(payload.ID, payload.BOMID, payload.PlannedQty, actorName(session))
+			if err != nil {
+				return mutationServiceError(err)
+			}
+			return recordMutationAudit(services, actorName(session), "created", "manufacturing:work-order:"+saved.ID)
+		})
+		if err != nil {
+			respondMutationError(w, err)
+			return
+		}
+		respondJSON(w, http.StatusCreated, saved)
+	default:
+		methodNotAllowed(w, "GET, POST")
+	}
+}
+
+func handleManufacturingWorkOrderTransition(w http.ResponseWriter, r *http.Request, sessions auth.SessionService, transactionScope TransactionScope) {
+	path := strings.TrimPrefix(r.URL.Path, "/api/manufacturing/work-orders/")
+	parts := strings.Split(path, "/")
+	if len(parts) != 2 || parts[0] == "" || (parts[1] != "release" && parts[1] != "complete") {
+		notFound(w)
+		return
+	}
+	if r.Method != http.MethodPost {
+		methodNotAllowed(w, "POST")
+		return
+	}
+	_, session, _ := currentSession(r, sessions)
+	permission := core.PermissionManufacturingWorkOrderRelease
+	if parts[1] == "complete" {
+		permission = core.PermissionManufacturingWorkOrderComplete
+	}
+	if !core.Can(session.Role, permission) {
+		respondJSON(w, http.StatusForbidden, map[string]any{"error": "forbidden"})
+		return
+	}
+
+	goodQty := 0
+	if parts[1] == "complete" {
+		var payload struct {
+			GoodQty int `json:"goodQty"`
+		}
+		if err := decodeManufacturingJSONBody(w, r, &payload); err != nil {
+			if isBodyTooLarge(err) {
+				respondError(w, http.StatusRequestEntityTooLarge, err)
+				return
+			}
+			respondError(w, http.StatusBadRequest, err)
+			return
+		}
+		goodQty = payload.GoodQty
+	}
+
+	var saved manufacturing.WorkOrder
+	err := runMutation(r.Context(), transactionScope, func(services TransactionServices) error {
+		if services.Manufacturing == nil {
+			return errors.New("transaction scope has no manufacturing service")
+		}
+		var err error
+		if parts[1] == "release" {
+			saved, err = services.Manufacturing.ReleaseWorkOrder(parts[0], actorName(session))
+		} else {
+			saved, err = services.Manufacturing.CompleteWorkOrder(parts[0], goodQty, actorName(session))
+		}
+		if err != nil {
+			return mutationServiceError(err)
+		}
+		return recordMutationAudit(services, actorName(session), parts[1]+"d", "manufacturing:work-order:"+saved.ID)
+	})
+	if err != nil {
+		respondMutationError(w, err)
+		return
+	}
+	respondJSON(w, http.StatusOK, saved)
 }
 
 func newHTTPServer(addr string, handler http.Handler) *http.Server {
@@ -871,6 +1144,25 @@ func decodeJSON(body io.Reader, target any) error {
 
 func decodeJSONBody(w http.ResponseWriter, r *http.Request, maxBytes int64, target any) error {
 	return decodeJSON(limitedBody(w, r, maxBytes), target)
+}
+
+func decodeManufacturingJSONBody(w http.ResponseWriter, r *http.Request, target any) error {
+	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, requestBodyLimit))
+	if err != nil {
+		return err
+	}
+	decoder := json.NewDecoder(bytes.NewReader(body))
+	if err := decoder.Decode(target); err != nil {
+		return err
+	}
+	var trailing json.RawMessage
+	if err := decoder.Decode(&trailing); err != io.EOF {
+		if err == nil {
+			return errors.New("request body must contain exactly one JSON value")
+		}
+		return err
+	}
+	return nil
 }
 
 func isBodyTooLarge(err error) bool {

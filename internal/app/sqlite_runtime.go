@@ -16,6 +16,7 @@ import (
 	"zapatos-erp-go/internal/modules/billing"
 	"zapatos-erp-go/internal/modules/finishedgoods"
 	"zapatos-erp-go/internal/modules/logistics"
+	"zapatos-erp-go/internal/modules/manufacturing"
 	"zapatos-erp-go/internal/modules/packaging"
 	"zapatos-erp-go/internal/modules/rawmaterials"
 	"zapatos-erp-go/internal/server"
@@ -382,12 +383,19 @@ func buildSQLiteModules(db *sql.DB) *server.Modules {
 		func(item logistics.StorageSlot) string { return item.ID })
 	invoiceRepo := store.NewSQLiteRepository(db, store.CollectionInvoices,
 		func(item billing.Invoice) string { return item.ID })
+	bomRepo := store.NewSQLiteRepository(db, store.CollectionManufacturingBOMs,
+		func(item manufacturing.BOM) string { return item.ID })
+	workOrderRepo := store.NewSQLiteRepository(db, store.CollectionManufacturingWorkOrders,
+		func(item manufacturing.WorkOrder) string { return item.ID })
+	movementRepo := store.NewSQLiteRepository(db, store.CollectionMaterialMovements,
+		func(item manufacturing.MaterialMovement) string { return item.ID })
 
 	rawService := rawmaterials.New(rawRepo)
 	finishedService := finishedgoods.New(finishedRepo)
 	packagingService := packaging.New(packagingRepo)
 	logisticsService := logistics.New(logisticsRepo)
 	billingService := billing.New(invoiceRepo)
+	manufacturingService := manufacturing.New(bomRepo, workOrderRepo, movementRepo, rawService, finishedService)
 	foxproAdapter := foxpro.New(billingService)
 	return &server.Modules{
 		RawMaterials:  rawService,
@@ -395,6 +403,7 @@ func buildSQLiteModules(db *sql.DB) *server.Modules {
 		Packaging:     packagingService,
 		Logistics:     logisticsService,
 		Billing:       billingService,
+		Manufacturing: manufacturingService,
 		Foxpro:        foxproAdapter,
 	}
 }
