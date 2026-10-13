@@ -237,3 +237,17 @@ func TestManufacturingMutationsDoNotSendActorOrConsumption(t *testing.T) {
 		}
 	}
 }
+
+func TestManufacturingFormTitlesBreakTheirOwnLine(t *testing.T) {
+	html := NewUI().Render()
+	for _, want := range []string{
+		"form.card.row>h3{flex-basis:100%;margin:0 0 4px}",
+		`<form class="card row" onsubmit="event.preventDefault();openMaterialStock(this)"><h3>Abrir stock de material</h3>`,
+		`<form class="card row" onsubmit="event.preventDefault();saveBOM(this)"><h3>Crear línea de materiales</h3>`,
+		`<form class="card row" onsubmit="event.preventDefault();createWorkOrder(this)"><h3>Crear orden de trabajo</h3>`,
+	} {
+		if !strings.Contains(html, want) {
+			t.Fatalf("expected manufacturing layout to contain %q", want)
+		}
+	}
+}
