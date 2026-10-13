@@ -1658,8 +1658,8 @@ func TestRunHTTPServerWaitsForActiveHandlersBeforeReturning(t *testing.T) {
 	release()
 	select {
 	case err := <-serverDone:
-		if !errors.Is(err, http.ErrServerClosed) {
-			t.Fatalf("runHTTPServer error = %v, want http.ErrServerClosed", err)
+		if err != nil {
+			t.Fatalf("runHTTPServer error = %v after draining, want nil for a clean exit", err)
 		}
 	case <-time.After(3 * time.Second):
 		t.Fatal("server did not return after the active handler drained")
@@ -1671,5 +1671,46 @@ func TestRunHTTPServerWaitsForActiveHandlersBeforeReturning(t *testing.T) {
 		}
 	case <-time.After(3 * time.Second):
 		t.Fatal("HTTP request did not finish")
+	}
+}
+
+// The container entrypoint exits non-zero when Run returns an error, so a clean
+// SIGTERM shutdown must not surface http.ErrServerClosed as a failure.
+func TestRunHTTPServerReturnsNilOnCleanShutdown(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("reserve HTTP address: %v", err)
+	}
+	addr := listener.Addr().String()
+	if err := listener.Close(); err != nil {
+		t.Fatalf("release reserved HTTP address: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	serverDone := make(chan error, 1)
+	go func() {
+		serverDone <- runHTTPServer(ctx, addr, http.NewServeMux())
+	}()
+
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		connection, dialErr := net.DialTimeout("tcp", addr, 50*time.Millisecond)
+		if dialErr == nil {
+			_ = connection.Close()
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	cancel()
+	select {
+	case err := <-serverDone:
+		if err != nil {
+			t.Fatalf("runHTTPServer returned %v after a clean shutdown, want nil so the process can exit 0", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("server did not return after shutdown")
 	}
 }

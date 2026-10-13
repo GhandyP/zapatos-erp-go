@@ -135,6 +135,13 @@ func runHTTPServer(ctx context.Context, addr string, handler http.Handler) error
 	close(serveDone)
 	<-shutdownDone
 	tracker.wait()
+	// ListenAndServe reports http.ErrServerClosed once Shutdown or Close has been
+	// requested. That is a clean stop, and the process must exit 0 for the container
+	// entrypoint and for orchestrators that read a non-zero exit as a failure, so it
+	// is not surfaced as an error.
+	if errors.Is(listenErr, http.ErrServerClosed) {
+		return nil
+	}
 	return listenErr
 }
 
