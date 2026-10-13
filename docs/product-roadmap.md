@@ -8,17 +8,19 @@ This roadmap orders work toward a credible, bounded portfolio demo and a more us
 
 ## Current state
 
-- **Current — raw-material entry flow:** the inline UI served at `/` and `/app` can submit raw materials to `POST /api/raw-materials`. It collects ID, name, unit, non-negative integer minimum stock, and positive length/width/height plus non-negative weight. The service validates required fields and dimensions; the UI displays submit errors. This is a focused entry slice, not a purchasing, inventory-movement, or consumption workflow.
-- The Go application has basic raw-material, finished-goods, packaging, logistics, billing/invoice, audit, and FoxPro-adapter areas. Domain records are JSON-file-backed; invoices have totals/status but not invoice lines. Finished-goods stock adjustments exist, but they are not a manufacturing material ledger.
-- `docs/http-contract.md` does not fully match the handlers/UI: it documents `/api/billing` and `/api/foxpro/status`, while the current UI and server use `/api/invoices` (including `POST /api/invoices/{id}/issue`) and `GET /api/foxpro`; sync is `POST /api/foxpro/sync`. Align the contract before treating it as a reliable integration guide.
-- The documented runtime defaults are bind address `:3001` and data directory `data/`; bootstrap settings are described in `config/bootstrap.json`. `:3001` is a wildcard listener, not a loopback-only promise.
-- CI, Docker packaging, a README, and request/metrics observability already exist (`.github/workflows/`, `Dockerfile`, `README.md`, `internal/observability/`). Their existence is not proof of a verified operational demo or production readiness.
+- **Current — storage:** all business records, audit events, and sessions live in `data/zapatos.sqlite` (pure-Go SQLite, WAL, one host, one writable volume, every instance under the same UID). Startup runs a strict one-time JSON import gate that validates and backs up the legacy files byte-for-byte before creating the database, and ignores them once its completion marker exists. A business mutation and its audit event commit in the same transaction. See the [README](../README.md) operational notes and the [backup and restore runbook](backup-restore-runbook.md).
+- **Current — HTTP contract:** `docs/http-contract.md` matches the handlers and the UI, including `/api/invoices` with `POST /api/invoices/{id}/issue` and `GET /api/foxpro` with `POST /api/foxpro/sync`; the stale `/api/billing` and `/api/foxpro/status` paths are gone, and contract checks cover representative route, method, authorization, and status behaviour.
+- **Current — modules and UI:** the single-page Spanish UI covers raw materials, finished goods with stock adjustments, packaging, logistics, billing/invoice, manufacturing, audit with CSV export, and the FoxPro adapter. Roles are granted in `internal/core/permissions.go` and enforced again on every request.
+- **Current — provisional manufacturing prototype:** one material, one BOM line per finished variant, and a work-order lifecycle (`draft → released → completed`) in which completion consumes `planned quantity × quantity per unit` from material stock and increments finished stock inside one transaction. Administrator-only opening stock and BOM writes; production may read manufacturing data and run work orders. Browser-verified against an isolated instance, and **not validated with factory users**.
+- **Current — runtime defaults:** the checked-in `config/bootstrap.json` binds `:3001` (a wildcard listener, not a loopback-only promise) with data directory `data/`; if that file is missing or unparsable, the built-in fallback is `:3000`.
+- Invoices still carry totals and status but no line items; there are no lots, scrap, rework, or costing.
+- CI, Docker packaging, the README, and request/metrics observability exist (`.github/workflows/`, `Dockerfile`, `README.md`, `internal/observability/`). Their existence is not proof of a verified operational demo or production readiness.
 
 ## Prioritized phases
 
 ### 0. Current — make the raw-material entry slice demoable
 
-**Code status:** implemented in the current UI/service; remaining work is user validation and a repeatable demo run-through.
+**Code status:** implemented in the current UI/service, now backed by SQLite; remaining work is user validation and a repeatable demo run-through.
 
 - Confirm the fields, units, dimension requirements, and minimum-stock meaning with a factory user.
 - Demonstrate a valid create with a non-negative integer minimum stock, rejection of invalid dimensions/stock, and a visible API failure using a resettable demo dataset.
@@ -28,41 +30,34 @@ This roadmap orders work toward a credible, bounded portfolio demo and a more us
 
 ### 1. API-contract alignment (#4)
 
-**Proposed.** Reconcile `docs/http-contract.md`, the server handlers, and the inline UI before adding more consumers or screens.
+**Done.** Commit `bec15a1f227f878ac4daf010587ff6ea3e83d99e` reconciled `docs/http-contract.md` with the server and the UI, and later work units extended it with the manufacturing endpoints and their role gates. The contract now documents actual paths, methods, authentication, request/response shapes, validation, status codes, and error behaviour for login, probes, raw materials, finished goods, packaging, logistics, invoices, manufacturing, audit, and FoxPro status/sync, and it has native review approval.
 
-- Document actual paths, methods, authentication, request/response shapes, validation, status codes, and error behavior for login, probes, raw materials, finished goods, packaging, logistics, invoices, audit, and FoxPro status/sync.
-- Replace stale billing/FoxPro paths with the current invoice and adapter routes, or deliberately change the implementation in a separately scoped work unit.
-- Add contract-level examples and checks so future handler and documentation changes remain in agreement.
-
-**Acceptance criteria:** every documented route is implemented with the documented method and auth rule; UI requests match the contract; errors and response payloads are represented accurately; stale aliases are explicitly described as unsupported or intentionally retained.
+**Acceptance criteria:** met for the documented surface — every documented route is implemented with the documented method and authorization rule, UI requests match the contract, and tests cover representative route, method, authorization, and status behaviour so drift is detectable.
 
 ### 2. Audit and storage data integrity (#2)
 
-**Proposed.** Decide what reliability the product needs before adding workflows that depend on trustworthy stock and audit history. The current JSON repositories use in-process synchronization and snapshot writes; that does not decide or provide safe multi-process access. Audit persistence errors are currently ignored by the recording path, and history is bounded.
+**Resolved and implemented.** The supported operating model is decided and documented: several instances may share one local durable data directory on a single host under the same UID, and cross-host or shared-network storage is unsupported. Business and audit state moved to SQLite; every mutation runs through one transaction scope so a business change and its audit event commit together or not at all, and a failure surfaces as a `500` instead of a silent success. After the migration marker is complete there is no fallback to stale JSON, so a missing or unreadable database fails closed rather than appearing to preserve records.
 
-- Define the supported operating model: one process on one writable data directory, or concurrent/multi-instance operation. Select and document JSON constraints or a migration target (for example, a transactional database) based on that decision.
-- Make failed writes visible and define what happens when a write, rename, disk-full event, or restart interrupts a change. Prevent seed fallback or malformed-file recovery from silently appearing to preserve live records.
-- Define audit ordering, retention, durability, and recovery expectations; ensure important business mutations cannot report success while their required audit record is silently lost.
-- Specify consistent backup/restore and migration behavior for all business and audit/session state. Test crash/restart, malformed snapshots, concurrent writers within the supported model, and restoration from backup.
+**Remaining, explicitly not verified:** no crash-injection or disk-full test proves the durability boundary at the filesystem level; multi-instance concurrency is covered by the migration lock and WAL behaviour but not by a sustained concurrent-writer test; and the audit cap of 500 events applies to the writer, not to rows inserted by the one-time import.
 
-**Acceptance criteria:** the single- or multi-process guarantee is explicit; mutations and audit events have a documented durability boundary; recoveries preserve or clearly identify lost/corrupt data; backup/restore is repeatable; storage failures are observable. File-permission and credential-protection work is tracked separately in [`security-backlog.md`](security-backlog.md), not duplicated here.
+**Acceptance criteria:** the operating model is explicit; mutations and audit events share one durability boundary; recovery is documented and exercised; storage failures are observable. Backup and restore is covered by [`backup-restore-runbook.md`](backup-restore-runbook.md) and its rehearsed evidence. File-permission and credential-protection work stays in [`security-backlog.md`](security-backlog.md).
 
 ### 3. Validate and phase in manufacturing workflows
 
-**Proposed; factory discovery is a gate, not an assumption.** First map the actual factory's roles, vocabulary, units, variants, exception paths, paper/spreadsheet records, and required reports. Prototype one end-to-end path with users before expanding the model.
+**Prototype implemented; factory discovery is still the gate.** The provisional slice below is built and browser-verified, and it must not be presented as a validated manufacturing model: one material, one BOM line per variant, integer quantities, and consumption based on the planned quantity. Map the actual factory's roles, vocabulary, units, variants, exception paths, paper/spreadsheet records, and required reports, then adjust the prototype with users before expanding it.
 
-| Order | Workflow slice | Acceptance criteria |
+| Order | Workflow slice | Status |
 |---|---|---|
-| 3a | Bills of materials (BOMs) and routings | A product/version identifies required materials, quantities, units, and operation sequence; revisions are traceable and usable for a real agreed example. |
-| 3b | Work orders | A work order identifies product/variant, planned quantity, dates, status, and applicable BOM/routing revision; status transitions are validated with users. |
-| 3c | Material movements and consumption | Receipts, issues, returns, and consumption update stock through attributable movements; duplicate or invalid movements are rejected and balances can be reconciled. |
-| 3d | Lot traceability | Material lots can be followed from receipt through consumption to finished lots/orders, with a usable forward/backward trace for a sample. |
-| 3e | Quality, scrap, and rework | Inspections and dispositions capture pass/fail, scrap, rework, and the effect on quantities/status; an agreed exception scenario is auditable. |
-| 3f | Purchasing and suppliers | Supplier and purchase-order lifecycle covers the factory's agreed request/order/receipt cases and links receipts to lots and stock. |
-| 3g | Customer orders, delivery, and invoice lines | Customer orders connect to available/produced goods, delivery confirmation, and invoice line items; quantities and totals reconcile through the flow. |
-| 3h | Costing | Material, labor/operation, scrap/rework, and other agreed cost inputs are traceable to a product/order; users can explain a sample calculation. |
+| 3a | Bills of materials (BOMs) and routings | Prototype: one BOM line per variant with a revision; no operation sequence |
+| 3b | Work orders | Prototype: draft → released → completed with planned/good quantities; no dates or routing revision |
+| 3c | Material movements and consumption | Partial: opening stock and consumption movements update one integer balance; no receipts, returns, or lots |
+| 3d | Lot traceability | Proposed |
+| 3e | Quality, scrap, and rework | Proposed |
+| 3f | Purchasing and suppliers | Proposed |
+| 3g | Customer orders, delivery, and invoice lines | Proposed |
+| 3h | Costing | Proposed |
 
-**Acceptance criteria for the phase:** factory users validate the modeled happy path and material exception cases; every slice has role-specific acceptance examples and reconciled quantities; reports and audit history support the agreed operational questions. Do not start all slices as one large redesign.
+**Acceptance criteria for the phase:** factory users validate the modeled happy path and material exception cases; the slice entities in the prototype table are revised where the factory disagrees; every expanded slice gets role-specific acceptance examples and reconciled quantities. Do not start all slices as one large redesign.
 
 ### 4. FoxPro integration — scope decision first
 
@@ -75,13 +70,13 @@ This roadmap orders work toward a credible, bounded portfolio demo and a more us
 
 ### 5. Operational and portfolio-demo readiness
 
-**Proposed.** Reuse existing CI, Docker packaging, and observability rather than duplicating them as new baseline features.
+**Partly done.** Reuse existing CI, Docker packaging, and observability rather than duplicating them as new baseline features. The backup/restore runbook and the supported topology are complete; the Docker smoke run and the demo data and scripted run-through are pending.
 
-- Complete the backup/restore runbook and a restore rehearsal using the full configured data directory.
-- Resolve the storage/migration and concurrency decision from Phase 2 and document the supported deployment topology.
-- Perform a Docker smoke run with a writable volume and the documented bootstrap/default configuration; confirm startup, the chosen demo flow, persistence after restart, and clean shutdown.
-- Create resettable, clearly fictional demo data and a short scripted run-through covering the raw-material entry slice and only the other workflows that actually exist.
-- Reconcile OpenSpec plans with repository reality before opening follow-up work. The Spanish `openspec/changes/la idea es ver que le falta a este programa para estar listo y funcional (usa perplexity concil para buscar idea que pudieran ser utiles , ideas elementos y estructuras que sean utiles )/` proposal/design/tasks and `openspec/changes/la-idea-es-ver-que-le-falta-a-este-programa-para-estar-listo-y-funcional/exploration.md` contain stale statements that modules or CI/Docker/README/observability are absent, alongside tasks now marked complete. The repository already contains those modules and platform files/specs. Reconcile or archive stale/duplicate tasks; do not revive the dropped Perplexity request or count implemented CI, Docker, and observability as missing work.
+- **Done — backup and restore runbook:** [`backup-restore-runbook.md`](backup-restore-runbook.md) documents what the data directory holds, how to take a consistent backup, how to restore it, and what to verify; the procedure was rehearsed end to end (identical work orders, material balance, and finished stock after a wipe and restore, with the original file modes restored).
+- **Done — supported topology:** the single-host, same-UID, local-durable-volume contract is documented in the README operational notes, the runbook, and the [PostgreSQL plan](postgresql-migration-plan.md).
+- **Pending — Docker smoke run:** build the image, run it with a writable volume, confirm startup, a write, persistence across restart, and a clean shutdown.
+- **Pending — resettable demo data and a scripted run-through:** clearly fictional data plus a short walkthrough covering the manufacturing slice and the modules that exist, starting from a clean state.
+- **Pending — OpenSpec reconciliation:** the Spanish `openspec/changes/la idea es ver que le falta a este programa para estar listo y funcional (usa perplexity concil para buscar idea que pudieran ser utiles , ideas elementos y estructuras que sean utiles )/` proposal/design/tasks and `openspec/changes/la-idea-es-ver-que-le-falta-a-este-programa-para-estar-listo-y-funcional/exploration.md` contain stale statements that modules or CI/Docker/README/observability are absent, alongside tasks now marked complete. The repository already contains those modules and platform files/specs. Reconcile or archive stale/duplicate tasks; do not revive the dropped Perplexity request or count implemented CI, Docker, and observability as missing work.
 
 **Acceptance criteria:** a fresh documented demo setup is repeatable; a restore has been exercised; the demo script works from a clean/reset state; known limitations and the security warning are visible to reviewers.
 
