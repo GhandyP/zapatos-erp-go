@@ -1,0 +1,9 @@
+[
+  {
+    "id": "inv-demo-1",
+    "customerId": "cli-demo",
+    "total": 100,
+    "tax": 21,
+    "status": "issued"
+  }
+]

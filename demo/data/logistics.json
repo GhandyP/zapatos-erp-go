@@ -1,0 +1,14 @@
+[
+  {
+    "id": "slot-demo-1",
+    "name": "Rack A (demo)",
+    "zone": "Z1",
+    "capacityUnits": 5,
+    "dimensions": {
+      "lengthCm": 100,
+      "widthCm": 60,
+      "heightCm": 180,
+      "weightKg": 12
+    }
+  }
+]

@@ -1,0 +1,14 @@
+[
+  {
+    "id": "rm-100",
+    "name": "Cuero sintético (demo)",
+    "unit": "m2",
+    "minStock": 10,
+    "dimensions": {
+      "lengthCm": 100,
+      "widthCm": 50,
+      "heightCm": 2,
+      "weightKg": 3.5
+    }
+  }
+]

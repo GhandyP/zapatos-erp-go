@@ -97,4 +97,5 @@ If the file is missing or invalid, the app falls back to a `:3000` bind address,
 - [`docs/security-backlog.md`](docs/security-backlog.md) — deferred security work; read it before exposing the app to untrusted networks.
 - [`docs/postgresql-migration-plan.md`](docs/postgresql-migration-plan.md) — future PostgreSQL integration: storage seams and obstacles, configuration and connection, schema and migrations, data cutover, backups and rollback, testing, rollout, and the open questions that need an owner. Plan only; SQLite remains the running storage.
 - [`docs/backup-restore-runbook.md`](docs/backup-restore-runbook.md) — what the data directory holds, how to take a consistent backup, how to restore it, the verification checklist, and the rehearsed evidence for that procedure.
+- [`docs/demo-runthrough.md`](docs/demo-runthrough.md) — reset the fictional dataset in `demo/` with `demo/reset.sh` and walk through the manufacturing slice, the role gates, and the audit trail step by step.
 - [`odd/tasks/product-readiness-2-3-4.md`](odd/tasks/product-readiness-2-3-4.md) — tracked work plan, decisions, checks, and commit and review evidence for this workstream.
