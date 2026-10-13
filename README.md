@@ -61,3 +61,12 @@ If the file is missing, the app falls back to safe defaults.
 - 5xx responses are redacted to avoid leaking internal details.
 - The first-run seed accounts are intended for local or controlled environments only.
 - Owner-only SQLite/data/backup modes are supported on Linux, macOS, and BSD targets covered by the host-local file lock; startup fails closed on other platforms.
+- The storage contract described above is what runs today. A later move to PostgreSQL is planned on paper only: nothing is implemented, configured, or connected. See [`docs/postgresql-migration-plan.md`](docs/postgresql-migration-plan.md).
+
+## Documentation
+
+- [`docs/product-roadmap.md`](docs/product-roadmap.md) — approved direction and the boundary between current and proposed work.
+- [`docs/http-contract.md`](docs/http-contract.md) — HTTP endpoints, request fields, validation rules, role gates, and status codes.
+- [`docs/security-backlog.md`](docs/security-backlog.md) — deferred security work; read it before exposing the app to untrusted networks.
+- [`docs/postgresql-migration-plan.md`](docs/postgresql-migration-plan.md) — future PostgreSQL integration: storage seams and obstacles, configuration and connection, schema and migrations, data cutover, backups and rollback, testing, rollout, and the open questions that need an owner. Plan only; SQLite remains the running storage.
+- [`odd/tasks/product-readiness-2-3-4.md`](odd/tasks/product-readiness-2-3-4.md) — tracked work plan, decisions, checks, and commit and review evidence for this workstream.
