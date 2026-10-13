@@ -93,3 +93,147 @@ func TestAuditoriaSeesRawMaterialsWithoutCreateForm(t *testing.T) {
 		}
 	}
 }
+
+func TestManufacturingSectionIsAvailableToAdminAndProduction(t *testing.T) {
+	html := NewUI().Render()
+	for _, want := range []string{
+		"administrador:['raw-materials','finished-goods','packaging','logistics','billing','foxpro','audit','manufacturing']",
+		"produccion:['raw-materials','finished-goods','packaging','logistics','manufacturing']",
+		"'manufacturing':'Fabricación'",
+		"'manufacturing':refreshManufacturing",
+	} {
+		if !strings.Contains(html, want) {
+			t.Fatalf("expected manufacturing section to contain %q", want)
+		}
+	}
+}
+
+func TestManufacturingAdminControlsAreRoleGatedAndValidated(t *testing.T) {
+	html := NewUI().Render()
+	for _, want := range []string{
+		"function manufacturingAdminForms(){return activeRole==='administrador'?formOpeningStock()+formBOM():''}",
+		`<input name="materialId" value="rm-100" placeholder="rm-100" required>`,
+		`<input name="unit" value="m2" placeholder="m2" required>`,
+		`<input name="quantity" type="number" value="100" min="1" step="1" required`,
+		`<input name="id" value="bom-loafer-v1" placeholder="bom-loafer-v1" required>`,
+		`<input name="revision" type="number" value="1" min="1" step="1" required`,
+		`<input name="variantId" value="fg-loafer-negro-39" placeholder="fg-loafer-negro-39" required>`,
+		`<input name="quantityPerUnit" type="number" value="1" min="1" step="1" required`,
+	} {
+		if !strings.Contains(html, want) {
+			t.Fatalf("expected manufacturing controls to contain %q", want)
+		}
+	}
+}
+
+func TestManufacturingActionsUseExpectedAPIsAndRefresh(t *testing.T) {
+	html := NewUI().Render()
+	for _, want := range []string{
+		`api('/api/manufacturing/materials/'+encodeURIComponent(materialId)+'/balance')`,
+		`const materials=await api('/api/raw-materials')`,
+		`document.getElementById('manufacturing-balance').textContent='Saldo disponible: '+balance.onHand+' '+context+' ('+balance.materialId+')'`,
+		`api('/api/manufacturing/material-stock/openings',{method:'POST',body:JSON.stringify({materialId,unit,quantity})})`,
+		`api('/api/manufacturing/boms',{method:'POST',body:JSON.stringify({id,revision,variantId,materialId,quantityPerUnit,unit})})`,
+		`api('/api/manufacturing/work-orders',{method:'POST',body:JSON.stringify({id,bomId,plannedQty})})`,
+		`api('/api/manufacturing/work-orders/'+encodeURIComponent(id)+'/release',{method:'POST'})`,
+		`api('/api/manufacturing/work-orders/'+encodeURIComponent(id)+'/complete',{method:'POST',body:JSON.stringify({goodQty})})`,
+		`<input name="plannedQty" type="number" value="1" min="1" step="1" required`,
+		`<input name="goodQty" type="number" min="1" step="1" required`,
+		`qty.max=String(order.plannedQty)`,
+		`Number.isInteger(goodQty)||goodQty<=0||goodQty>order.plannedQty`,
+		"await refreshManufacturing()",
+	} {
+		if !strings.Contains(html, want) {
+			t.Fatalf("expected manufacturing action to contain %q", want)
+		}
+	}
+	for _, function := range []string{"openMaterialStock", "saveBOM", "createWorkOrder", "releaseWorkOrder", "completeWorkOrder"} {
+		start := strings.Index(html, "async function "+function+"(")
+		if start < 0 {
+			t.Fatalf("expected rendered html to contain %s action", function)
+		}
+		end := strings.Index(html[start+1:], "\nasync function ")
+		if end < 0 {
+			end = len(html) - start - 1
+		}
+		declaration := html[start : start+1+end]
+		apiCall := strings.Index(declaration, "await api(")
+		refreshCall := strings.Index(declaration, "await refreshManufacturing()")
+		if apiCall < 0 || refreshCall <= apiCall {
+			t.Fatalf("expected %s to refresh lists after its API call", function)
+		}
+		if !strings.Contains(declaration, "catch(error){showManufacturingError(error)}") {
+			t.Fatalf("expected %s failures to appear in the manufacturing alert", function)
+		}
+	}
+}
+
+func TestManufacturingFailuresAreVisibleAndSuccessRefreshesLists(t *testing.T) {
+	html := NewUI().Render()
+	for _, want := range []string{
+		`<p id="manufacturing-alert" class="muted" role="alert" hidden></p>`,
+		`function showManufacturingError(error){const alert=document.getElementById('manufacturing-alert');if(alert){alert.textContent=error&&error.message?error.message:'No se pudo completar la acción de fabricación';alert.hidden=false}}`,
+		"typeof data==='string'?data:(data&&(data.error||JSON.stringify(data)))||res.statusText",
+		"catch(error){showManufacturingError(error)}",
+		"await refreshManufacturing()",
+		"async function refreshManufacturing()",
+		"manufacturingWorkOrders=workOrders",
+		`catch(error){showManufacturingError(error)}}`,
+	} {
+		if !strings.Contains(html, want) {
+			t.Fatalf("expected visible manufacturing feedback to contain %q", want)
+		}
+	}
+}
+
+func TestManufacturingTablesUseSpanishLabelsForBothRoles(t *testing.T) {
+	html := NewUI().Render()
+	for _, want := range []string{
+		"const boms=await api('/api/manufacturing/boms')",
+		"'<h3>Listas de materiales</h3>'",
+		"bomId:'Lista de materiales'",
+		"plannedQty:'Cantidad planificada'",
+		"goodQty:'Cantidad buena'",
+		"variantId:'Variante'",
+		"quantityPerUnit:'Cantidad por unidad'",
+		"materialId:'Material'",
+		"escapeHtml(colLabels[c]||c)",
+	} {
+		if !strings.Contains(html, want) {
+			t.Fatalf("expected manufacturing tables to contain %q", want)
+		}
+	}
+	start := strings.Index(html, "async function refreshManufacturing(){")
+	if start < 0 {
+		t.Fatal("expected rendered html to contain refreshManufacturing declaration")
+	}
+	end := strings.Index(html[start:], "\nfunction formRaw(){")
+	if end < 0 {
+		t.Fatal("expected refreshManufacturing declaration to end before formRaw")
+	}
+	refreshDecl := html[start : start+end]
+	if strings.Contains(refreshDecl, "activeRole==='administrador'?await api('/api/manufacturing/boms')") {
+		t.Fatal("expected both roles to read the materials list instead of hiding it from production")
+	}
+}
+
+func TestManufacturingMutationsDoNotSendActorOrConsumption(t *testing.T) {
+	html := NewUI().Render()
+	for _, function := range []string{"openMaterialStock", "saveBOM", "createWorkOrder", "releaseWorkOrder", "completeWorkOrder"} {
+		start := strings.Index(html, "async function "+function+"(")
+		if start < 0 {
+			t.Fatalf("expected rendered html to contain %s action", function)
+		}
+		lineEnd := strings.Index(html[start:], "\n")
+		if lineEnd < 0 {
+			t.Fatalf("expected %s declaration to end with a newline", function)
+		}
+		declaration := html[start : start+lineEnd]
+		if !strings.HasSuffix(declaration, "}") {
+			t.Fatalf("expected %s to stay declared on one line so this check cannot pass vacuously", function)
+		}
+		if strings.Contains(declaration, "actor") || strings.Contains(declaration, "consumption") {
+			t.Fatalf("expected %s to leave actor and consumption to the server", function)
+		}
+	}
+}
