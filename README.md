@@ -96,4 +96,5 @@ If the file is missing or invalid, the app falls back to a `:3000` bind address,
 - [`docs/http-contract.md`](docs/http-contract.md) — HTTP endpoints, request fields, validation rules, role gates, and status codes.
 - [`docs/security-backlog.md`](docs/security-backlog.md) — deferred security work; read it before exposing the app to untrusted networks.
 - [`docs/postgresql-migration-plan.md`](docs/postgresql-migration-plan.md) — future PostgreSQL integration: storage seams and obstacles, configuration and connection, schema and migrations, data cutover, backups and rollback, testing, rollout, and the open questions that need an owner. Plan only; SQLite remains the running storage.
+- [`docs/backup-restore-runbook.md`](docs/backup-restore-runbook.md) — what the data directory holds, how to take a consistent backup, how to restore it, the verification checklist, and the rehearsed evidence for that procedure.
 - [`odd/tasks/product-readiness-2-3-4.md`](odd/tasks/product-readiness-2-3-4.md) — tracked work plan, decisions, checks, and commit and review evidence for this workstream.
