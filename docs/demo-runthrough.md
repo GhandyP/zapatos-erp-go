@@ -8,7 +8,9 @@
 PORT=3133 demo/reset.sh
 ```
 
-The script writes a bootstrap config for the chosen port, copies the fictional dataset from `demo/data/` into a scratch root (`$HOME/.cache/zapatos-erp-demo` by default), builds the binary when needed, starts the app, and waits for `/health`. Every record it loads is labelled `(demo)`. It only touches the root it is given and never the repository `data/` directory. Re-run it between demos; if an instance is already listening on the port, either stop it or pass `FORCE=1`.
+The script writes a bootstrap config for the chosen port, copies the fictional dataset from `demo/data/` into a scratch root (`$HOME/.cache/zapatos-erp-demo` by default), builds the binary inside that root when needed, starts the app, and requires a real `200` from `/health` before reporting success.
+
+It validates the root before deleting anything: top-level, dangerous, symlinked and repository paths are refused (including the repository's own `data/`), a symlinked `config/` or `data/` is refused, the binary must live inside the root, and nothing is removed while the demo port is still in use — either stop the instance or pass `FORCE=1` to stop it deliberately. Records carry a `(demo)` suffix where the domain has a name field; the demo invoice keeps a plain ID because invoices have no name, and the audit dataset starts empty.
 
 ## Walkthrough
 
@@ -24,8 +26,8 @@ Open `http://127.0.0.1:3133/app`.
 | 6 | Release `wo-demo-001`, then complete it with good quantity `1`. | The order reads `completed`, and the material balance drops to `99` (planned `1` × BOM `1`). |
 | 7 | Try to complete `wo-demo-001` again. | The section shows a visible error: `only released work orders can be completed`. Nothing changes. |
 | 8 | Sign out, sign in as `production` / `production123`. | No **Abrir stock de material** or **Crear línea de materiales** form appears; the materials and work-order lists are readable. |
-| 9 | Create `wo-prod-001` with planned quantity `2`, release it, complete it with good quantity `2`. | The order reads `completed` and the material balance drops to `97`. |
-| 10 | Sign back in as `admin` and open **Auditoría**. | Every action above is listed with actor, action, and entity; **Exportar CSV** downloads the same events. |
+| 9 | Replace the prefilled order ID with `wo-prod-001`, planned quantity `2`, then release it and complete it with good quantity `2`. | The order reads `completed` and the material balance drops to `97`. |
+| 10 | Sign back in as `admin` and open **Auditoría**. | The successful mutations above are listed with actor, action, and entity; **Exportar CSV** downloads the same events. Read-only actions such as the balance query, and rejected actions such as the repeated completion, write no audit event. |
 
 Optional extras that also work: adding a raw material with its dimensions, adjusting finished-goods stock, and creating or issuing an invoice as `ventas`.
 
