@@ -2,6 +2,31 @@
 
 Go-based ERP prototype for shoe manufacturing and operations.
 
+## What the prototype does
+
+A single-page Spanish UI is served at `/` and `/app`. Users sign in with a seeded account (the login panel lists the local accounts), and the UI renders the modules their role allows. Authorization is enforced on the server for every request, so hiding a control is only cosmetic.
+
+| Module | What it covers | Who can use it |
+| --- | --- | --- |
+| Raw materials | Material entry with id, name, unit, minimum stock, and length/width/height/weight. | `administrador`, `almacen`, `produccion` (write); `auditoria` (read) |
+| Finished goods | Variant entry plus stock adjustments. | `administrador`, `almacen`, `produccion` (write); `ventas`, `auditoria` (read) |
+| Packaging | Packaging specs with transport mode, maximum units, and dimensions. | `administrador`, `almacen`, `produccion` (write); `auditoria` (read) |
+| Logistics | Storage slots with zone and capacity. | `administrador`, `almacen`, `produccion` (write); `auditoria` (read) |
+| Billing | Invoice entry and issuing with customer, total, tax, and status. | `administrador`, `ventas`, `contabilidad` (write); `auditoria` (read) |
+| Manufacturing | The provisional production slice described below. | `administrador` (full); `produccion` (read and work-order actions) |
+| Audit | Recent audit events, newest first, and a CSV export. | `administrador`, `auditoria` |
+| FoxPro adapter | External adapter status and a manual sync trigger. | `administrador` |
+
+### Provisional manufacturing flow
+
+1. An administrator records opening stock for a material and configures one BOM line per finished variant (`POST /api/manufacturing/material-stock/openings`, `POST /api/manufacturing/boms`).
+2. An administrator or a `produccion` user creates a work order for a BOM, releases it, and completes it with the good quantity (`POST /api/manufacturing/work-orders`, then `.../release`, then `.../complete`).
+3. Completion consumes `planned quantity × quantity per unit` from the material, adds the good quantity to the finished variant, updates the order state, and writes the audit event in the same transaction. Material balance is available at `GET /api/manufacturing/materials/{materialId}/balance`.
+
+Quantities are integers, and each action is atomic: insufficient stock, an unknown reference, a repeated transition, or an unauthorized call changes nothing and reports the failure to the UI. These rules are provisional and still need factory validation — one material, one BOM line, and one finished variant are enough for the prototype, while scrap, lots, multiple BOM lines, purchasing, and costing are out of scope. Nothing here claims factory acceptance or production readiness.
+
+The endpoint-by-endpoint contract, payloads, role gates, and status codes are documented in [`docs/http-contract.md`](docs/http-contract.md).
+
 ## Requirements
 
 - Go 1.25+
@@ -16,8 +41,10 @@ go run ./cmd/zapatos-erp
 
 Defaults:
 
-- bind address: `:3001`
+- bind address: `:3001`, taken from the checked-in `config/bootstrap.json`
 - data directory: `data/`
+
+If `config/bootstrap.json` is missing or cannot be parsed, the built-in fallback is bind address `:3000` with the default seed accounts, so set `bindAddr` explicitly whenever that file is absent or replaced.
 
 ## Build
 
@@ -42,7 +69,7 @@ The container expects `/data` to be writable. The image ships with a symlink fro
 - `dataDir`
 - `seedAccounts`
 
-If the file is missing, the app falls back to safe defaults.
+If the file is missing or invalid, the app falls back to a `:3000` bind address, the repository `data/` directory, and the built-in seed accounts.
 
 ## Deployment prerequisites
 
